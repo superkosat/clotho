@@ -106,6 +106,7 @@ def build_system_prompt(
     environment_info: Optional[str] = None,
     custom_rules: Optional[str] = None,
     project_context: Optional[str] = None,
+    skills_section: Optional[str] = None,
     include_date: bool = True,
 ) -> str:
     """Build complete system prompt with optional injections."""
@@ -125,6 +126,19 @@ def build_system_prompt(
 
     if custom_rules:
         sections.append(f"# Rules\n{custom_rules}")
+
+    if skills_section:
+        sections.append(
+            "# Skills\n\n"
+            "Before replying, scan the <available_skills> list below. "
+            "Each skill has a <description> and optional <trigger> that describe when it applies.\n\n"
+            "Rules:\n"
+            "- If exactly one skill clearly matches the user's request: use the read tool to read the file at its <location>, then follow the instructions inside it precisely.\n"
+            "- If multiple skills could apply: pick the most specific one and read it.\n"
+            "- If no skill clearly applies: proceed normally without reading any skill file.\n"
+            "- Never guess at skill instructions — always read the file first.\n\n"
+            f"{skills_section}"
+        )
 
     return "\n\n".join(sections)
 

@@ -21,10 +21,20 @@ def get_sandbox_instance():
 
 def validate_command(command: str) -> tuple[bool, str | None]:
     """Block dangerous commands."""
-    dangerous_patterns = ['rm -rf /', 'format', ':(){:|:&};:']
-    for pattern in dangerous_patterns:
-        if pattern in command:
-            return False, f"Command contains dangerous pattern: {pattern}"
+    # rm with recursive+force flags targeting root or home
+    if re.search(r'\brm\b.*-[^\s]*r[^\s]*f[^\s]*\s+/', command) or \
+       re.search(r'\brm\b.*-[^\s]*f[^\s]*r[^\s]*\s+/', command):
+        return False, "Command contains dangerous pattern: rm -rf on root path"
+
+    # 'format' as a standalone command token (the disk format utility),
+    # not as part of a flag (--format), query param (&format=), or word
+    if re.search(r'(?<![=&\-\w])format(?![=\w])', command):
+        return False, "Command contains dangerous pattern: format"
+
+    # fork bomb
+    if ':(){:|:&};:' in command:
+        return False, "Command contains dangerous pattern: fork bomb"
+
     return True, None
 
 
@@ -36,8 +46,10 @@ def win_to_wsl_path(path: str) -> str:
 
 def translate_paths_for_wsl(command: str) -> str:
     """Find Windows-style absolute paths in a command and convert them to WSL paths."""
+    # Require backslash OR a single forward slash NOT followed by another slash,
+    # so that URL schemes like https:// are not matched as drive paths.
     return re.sub(
-        r'[A-Za-z]:[\\\/][^\s\'"]*',
+        r'[A-Za-z]:[\\\/](?!\/)[^\s\'"]*',
         lambda m: win_to_wsl_path(m.group()),
         command
     )

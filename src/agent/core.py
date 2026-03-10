@@ -13,6 +13,7 @@ from agent.providers.openai import OpenAIModel
 from agent.utils.projects import *
 from agent.tools.functions.bash import set_sandbox_instance
 from agent.prompts.system_prompt import build_system_prompt, build_environment_info
+from skills.loader import load_skills, build_skills_prompt_section
 
 from dotenv import load_dotenv
 from uuid import uuid4, UUID
@@ -155,7 +156,9 @@ class ClothoController():
         self.current_project_id = uuid4()
 
         env_info = build_environment_info(working_directory=os.getcwd())
-        prompt = build_system_prompt(environment_info=env_info)
+        skills = load_skills()
+        skills_section = build_skills_prompt_section(skills) if skills else None
+        prompt = build_system_prompt(environment_info=env_info, skills_section=skills_section)
         system_turn = SystemTurn(content=prompt)
 
         if (create_project_file(self.current_project_id, system_turn=system_turn)):
