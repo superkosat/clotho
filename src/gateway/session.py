@@ -9,13 +9,15 @@ logger = logging.getLogger(__name__)
 from agent.core import ClothoController
 from agent.tools.schemas.bash import bash_tool
 from agent.tools.schemas.read import read_tool
+from agent.tools.schemas.write import write_tool
 from agent.tools.schemas.edit import edit_tool
 from gateway.services.profile_service import ProfileService
 
 DEFAULT_TOOLS = [
     bash_tool,
     read_tool,
-    edit_tool
+    write_tool,
+    edit_tool,
 ]
 
 class SessionState:

@@ -4,7 +4,7 @@ from agent.tools.functions.write import write_func
 
 write_tool = Tool(
   name="write",
-  description="Write content to a file at the specified path. Can overwrite or append to existing files.",
+  description="Create a new file or overwrite/append to an existing file. Always use this instead of bash with cat, echo, or heredoc to create files.",
   parameters={
     "type": "object",
     "properties": {

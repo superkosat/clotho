@@ -73,7 +73,7 @@ class AgentService:
                 verdicts[tc["id"]] = "allow"
                 allow_calls.append(tc)
             elif level == PermissionLevel.DENY:
-                verdicts[tc["id"]] = "deny"
+                verdicts[tc["id"]] = "policy_deny"
                 deny_calls.append(tc)
             else:
                 ask_calls.append(tc)
@@ -111,7 +111,7 @@ class AgentService:
         finally:
             self.session.pending_approval = None
 
-        ask_verdict = "allow" if approved else "deny"
+        ask_verdict = "allow" if approved else "user_deny"
         for tc in ask_calls:
             verdicts[tc["id"]] = ask_verdict
 

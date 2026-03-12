@@ -60,6 +60,8 @@ class ClothoController():
             await self._emit_content(response, emit)
 
         # Tool use loop
+        consecutive_denials = 0
+        max_consecutive_denials = 3
         while response.stop_reason == "tool_use":
             tool_uses = [b for b in response.content if isinstance(b, ToolUseContent)]
 
@@ -70,17 +72,25 @@ class ClothoController():
             verdicts = await request_approval(tool_call_dicts)
 
             # Process each tool individually based on its verdict
+            all_denied = all(verdicts.get(t.id) != "allow" for t in tool_uses)
             tool_results = []
             for tool_use in tool_uses:
-                verdict = verdicts.get(tool_use.id, "deny")
+                verdict = verdicts.get(tool_use.id, "user_deny")
 
                 if verdict == "allow":
                     result = await asyncio.to_thread(self._execute_tool, tool_use)
-                else:
+                elif verdict == "policy_deny":
                     result = ToolResultContent(
                         tool_use_id=tool_use.id,
                         tool_name=tool_use.name,
-                        content=f"Tool '{tool_use.name}' denied by permission policy",
+                        content=f"Tool '{tool_use.name}' is not permitted by the current permission policy.",
+                        is_error=True,
+                    )
+                else:  # user_deny
+                    result = ToolResultContent(
+                        tool_use_id=tool_use.id,
+                        tool_name=tool_use.name,
+                        content=f"Tool '{tool_use.name}' denied by user. Try a different approach.",
                         is_error=True,
                     )
 
@@ -92,11 +102,15 @@ class ClothoController():
                     "is_error": result.is_error,
                 })
 
-            # If every tool was denied, stop the loop
-            if all(verdicts.get(t.id) == "deny" for t in tool_uses):
-                break
+            # Track consecutive all-denied rounds to prevent infinite loops
+            if all_denied:
+                consecutive_denials += 1
+                if consecutive_denials >= max_consecutive_denials:
+                    break
+            else:
+                consecutive_denials = 0
 
-            # Re-invoke with tool results
+            # Re-invoke with tool results (including denials, so the model can adapt)
             tool_turn = ToolTurn(content=tool_results)
             if stream:
                 response = await self._stream_and_emit(tool_turn, emit)
