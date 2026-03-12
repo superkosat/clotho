@@ -54,6 +54,14 @@ API Key: sk-ant-...
 | `/permission set <tool> <level>` | Override a tool: `allow`, `ask`, `deny` |
 | `/permission clear <tool>` | Remove a tool override |
 
+**Streaming**
+| Command | Description |
+|---|---|
+| `/stream` | Show current streaming status |
+| `/stream on` / `/stream off` | Toggle response streaming on or off |
+
+Streaming is enabled by default. When on, responses render incrementally as tokens arrive. When off, the full response is delivered after the model finishes.
+
 **Sandbox**
 | Command | Description |
 |---|---|
@@ -96,6 +104,31 @@ clotho sandbox build
 ```
 
 Sandbox is disabled by default.
+
+## Skills
+
+Clotho will discover and load skill descriptions into the system prompt if they are located under `~/.clotho/skills/` with a `SKILL.md` file:
+
+```
+~/.clotho/skills/
+    commit/
+        SKILL.md
+    review-pr/
+        SKILL.md
+```
+
+`SKILL.md` starts with YAML frontmatter declaring the skill's name and description. The rest of the file contains instructions that the agent reads on demand when it determines the skill applies.
+
+```markdown
+---
+name: commit
+description: Stage and commit changes with a conventional commit message.
+---
+
+<instructions for the agent to follow>
+```
+
+Only the frontmatter metadata is injected into the system prompt. The full instructions stay on disk and are loaded by the agent when a skill matches the user's request.
 
 ## CLI Reference
 
