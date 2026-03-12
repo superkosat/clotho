@@ -40,6 +40,7 @@ class AgentErrorData(BaseModel):
 
 class RunData(BaseModel):
     message: str
+    stream: bool = False
 
 class ToolApprovalData(BaseModel):
     approved: bool

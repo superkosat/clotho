@@ -34,11 +34,12 @@ class ClothoWebSocketClient:
             self._disconnecting = True
             await self.ws.close()
 
-    async def send_message(self, text: str):
+    async def send_message(self, text: str, stream: bool = True):
         """Send user message to agent.
 
         Args:
             text: User message text
+            stream: Whether to request streaming responses
 
         Raises:
             RuntimeError: If not connected
@@ -47,7 +48,7 @@ class ClothoWebSocketClient:
             raise RuntimeError("Not connected")
         await self.ws.send(json.dumps({
             "type": "run",
-            "data": {"message": text}
+            "data": {"message": text, "stream": stream}
         }))
 
     async def approve_tools(self):

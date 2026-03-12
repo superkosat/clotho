@@ -2,6 +2,7 @@ from collections.abc import Iterator
 
 from agent.models.tool import Tool
 from agent.models.turn import Turn, AssistantTurn
+from agent.models.stream_delta import StreamDelta
 from agent.models.content_block import TextContent, ImageContent, ToolUseContent, ToolResultContent
 from agent.models.usage import Usage
 from agent.LLM import LLM
@@ -16,21 +17,81 @@ class OllamaModel(LLM):
         self.model = model
         self.client = chat
 
-    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> Iterator[str]:
+    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> Iterator[StreamDelta]:
         ollama_messages = self._to_ollama_messages(messages)
 
-        if tools:
-            tools = self._convert_tools(tools)
+        converted_tools = self._convert_tools(tools) if tools else None
 
         stream = self.client(
             model=self.model,
             messages=ollama_messages,
-            tools=tools,
+            tools=converted_tools,
             stream=True,
             options={'num_predict': max_tokens, 'think': False}
         )
+
+        collected_text = ""
+        model_name = self.model
+        input_tokens = 0
+        output_tokens = 0
+        stop_reason = "end_turn"
+        tool_use_blocks = []
+
         for chunk in stream:
-            yield chunk.message.content
+            model_name = chunk.model or model_name
+
+            # Text content
+            if chunk.message.content:
+                collected_text += chunk.message.content
+                yield StreamDelta(type="text_delta", text=chunk.message.content)
+
+            # Ollama delivers tool_calls on the final chunk (not incrementally)
+            if chunk.message.tool_calls:
+                stop_reason = "tool_use"
+                for tc in chunk.message.tool_calls:
+                    tool_id = tc.function.name  # Ollama doesn't provide IDs
+                    tool_use_blocks.append(ToolUseContent(
+                        id=tool_id,
+                        name=tc.function.name,
+                        arguments=tc.function.arguments,
+                    ))
+                    yield StreamDelta(
+                        type="tool_use_start",
+                        tool_call_id=tool_id,
+                        tool_call_name=tc.function.name,
+                    )
+
+            # Usage info from the final chunk
+            if hasattr(chunk, 'prompt_eval_count') and chunk.prompt_eval_count:
+                input_tokens = chunk.prompt_eval_count
+            if hasattr(chunk, 'eval_count') and chunk.eval_count:
+                output_tokens = chunk.eval_count
+
+            # Done reason from the final chunk
+            if hasattr(chunk, 'done_reason') and chunk.done_reason:
+                if chunk.done_reason == "stop":
+                    stop_reason = stop_reason if stop_reason == "tool_use" else "end_turn"
+                else:
+                    stop_reason = "max_tokens"
+
+        # Build the final AssistantTurn
+        content_blocks = []
+        if collected_text:
+            content_blocks.append(TextContent(text=collected_text))
+        content_blocks.extend(tool_use_blocks)
+
+        if len(content_blocks) == 1 and isinstance(content_blocks[0], TextContent):
+            content = content_blocks[0].text
+        else:
+            content = content_blocks if content_blocks else ""
+
+        assistant_turn = AssistantTurn(
+            content=content,
+            model=model_name,
+            stop_reason=stop_reason,
+            usage=Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
+        yield StreamDelta(type="message_complete", assistant_turn=assistant_turn)
 
     def invoke(self, messages: list[dict], tools: list[Tool] | None, max_tokens: int) -> AssistantTurn:
         ollama_messages = self._to_ollama_messages(messages)
@@ -44,8 +105,8 @@ class OllamaModel(LLM):
             tools=tools,
             options={'num_predict': max_tokens, 'think': False}
         )
-        
-        return self._to_assistant_turn(response)  
+
+        return self._to_assistant_turn(response)
 
     def _to_ollama_messages(self, turns: list[Turn]) -> list[dict]:
         messages = []
@@ -127,7 +188,7 @@ class OllamaModel(LLM):
                 output_tokens=response.eval_count
             )
         )
-    
+
     def _convert_tools(self, tools: list[Tool]) -> list[dict]:
         return [
             {
@@ -140,6 +201,6 @@ class OllamaModel(LLM):
             }
             for tool in tools
         ]
-    
+
     def compact(self):
         pass

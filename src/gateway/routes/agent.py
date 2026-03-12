@@ -55,7 +55,7 @@ async def agent_websocket(websocket: WebSocket, chat_id: UUID):
             match event_type:
                 case "run":
                     run_task = asyncio.create_task(
-                        service.handle_run(data["message"])
+                        service.handle_run(data["message"], stream=data.get("stream", False))
                     )
                 case "tool_approval":
                     service.handle_tool_approval(data)

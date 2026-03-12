@@ -3,10 +3,13 @@
 import asyncio
 import inspect
 import os
+import queue
+from collections.abc import Iterator
 from typing import Callable, Awaitable
 
 from agent.models.tool import Tool
 from agent.models.content_block import TextContent, ToolUseContent, ToolResultContent
+from agent.models.stream_delta import StreamDelta
 from agent.models.turn import AssistantTurn, SystemTurn, UserTurn, ToolTurn
 from agent.providers.anthropic import AnthropicModel
 from agent.providers.openai import OpenAIModel
@@ -37,6 +40,7 @@ class ClothoController():
         user_input: str,
         emit: Callable[[str, dict], Awaitable[None]],
         request_approval: Callable[[list[dict]], Awaitable[dict[str, str]]],
+        stream: bool = False,
     ):
         """
         Full agent loop. Invokes model, handles tool use cycles, and
@@ -45,11 +49,15 @@ class ClothoController():
         emit(event_type, data) — deliver events to client
         request_approval(tool_calls) — evaluate per-tool permissions, returns
             dict mapping tool call IDs to "allow" or "deny"
+        stream — when True, emit incremental text_delta events as tokens arrive
         """
-        response = await asyncio.to_thread(self.invoke, UserTurn(content=user_input))
+        turn = UserTurn(content=user_input)
 
-        # Emit text content
-        await self._emit_content(response, emit)
+        if stream:
+            response = await self._stream_and_emit(turn, emit)
+        else:
+            response = await asyncio.to_thread(self.invoke, turn)
+            await self._emit_content(response, emit)
 
         # Tool use loop
         while response.stop_reason == "tool_use":
@@ -89,8 +97,12 @@ class ClothoController():
                 break
 
             # Re-invoke with tool results
-            response = await asyncio.to_thread(self.invoke, ToolTurn(content=tool_results))
-            await self._emit_content(response, emit)
+            tool_turn = ToolTurn(content=tool_results)
+            if stream:
+                response = await self._stream_and_emit(tool_turn, emit)
+            else:
+                response = await asyncio.to_thread(self.invoke, tool_turn)
+                await self._emit_content(response, emit)
 
         # Signal turn complete
         await emit("agent.turn_complete", {
@@ -207,7 +219,7 @@ class ClothoController():
         else:
             return False
 
-    def invoke(self, turn: UserTurn | ToolTurn, stream: bool = False) -> AssistantTurn:
+    def invoke(self, turn: UserTurn | ToolTurn) -> AssistantTurn:
         """
         Appends a turn to the context, invokes the model with the context,
         and updates the context and project file with both the input turn and
@@ -223,6 +235,69 @@ class ClothoController():
         self.context.append(response)
         self.checkpoint_turn(input_turn=turn, assistant_turn=response)
         return response
+
+    def stream_invoke(self, turn: UserTurn | ToolTurn) -> Iterator[StreamDelta]:
+        """
+        Appends a turn to the context, streams the model response as
+        StreamDelta objects. The final delta (message_complete) contains the
+        full AssistantTurn which is appended to context and checkpointed.
+        """
+        if self.model is None:
+            raise NoModelConfiguredError()
+        if self.context is None:
+            raise NoActiveChatError()
+
+        self.context.append(turn)
+        assistant_turn = None
+        for delta in self.model.stream_invoke(self.context, tools=self.tools, max_tokens=4000):
+            if delta.type == "message_complete":
+                assistant_turn = delta.assistant_turn
+            yield delta
+
+        if assistant_turn:
+            self.context.append(assistant_turn)
+            self.checkpoint_turn(input_turn=turn, assistant_turn=assistant_turn)
+
+    async def _stream_and_emit(
+        self,
+        turn: UserTurn | ToolTurn,
+        emit: Callable[[str, dict], Awaitable[None]],
+    ) -> AssistantTurn:
+        """
+        Run stream_invoke in a thread, forwarding deltas to the client via
+        emit as they arrive. Returns the final AssistantTurn.
+        """
+        q: queue.Queue[StreamDelta | None] = queue.Queue()
+
+        def _produce():
+            for delta in self.stream_invoke(turn):
+                q.put(delta)
+            q.put(None)  # sentinel
+
+        thread = asyncio.get_event_loop().run_in_executor(None, _produce)
+
+        assistant_turn = None
+        while True:
+            delta = await asyncio.to_thread(q.get)
+            if delta is None:
+                break
+            if delta.type == "text_delta":
+                await emit("agent.text_delta", {"text": delta.text})
+            elif delta.type == "tool_use_start":
+                await emit("agent.tool_use_start", {
+                    "tool_call_id": delta.tool_call_id,
+                    "tool_call_name": delta.tool_call_name,
+                })
+            elif delta.type == "tool_use_delta":
+                await emit("agent.tool_use_delta", {
+                    "text": delta.text,
+                    "tool_call_id": delta.tool_call_id,
+                })
+            elif delta.type == "message_complete":
+                assistant_turn = delta.assistant_turn
+
+        await thread  # ensure producer finished
+        return assistant_turn
     
     def register_tools(self, tools: list[Tool]):
         self.tools = tools

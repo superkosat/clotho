@@ -2,6 +2,7 @@ import json
 from collections.abc import Iterator
 
 from agent.LLM import LLM
+from agent.models.stream_delta import StreamDelta
 from agent.models.tool import Tool
 from agent.models.turn import AssistantTurn, Turn
 from agent.models.content_block import ImageContent, TextContent, ToolUseContent, ToolResultContent
@@ -23,24 +24,112 @@ class OpenAIModel(LLM):
             api_key=api_key
         )
 
-    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> Iterator[str]:
+    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> Iterator[StreamDelta]:
         openai_messages = self._to_openai_messages(messages)
 
-        if tools:
-            tools = self._convert_tools(tools)
-
-        stream = self.client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=openai_messages,
-            tools=tools,
             max_tokens=max_tokens,
             stream=True,
+            stream_options={"include_usage": True},
         )
-        
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools)
+
+        collected_text = ""
+        # tool_calls_acc: {index: {id, name, arguments_json}}
+        tool_calls_acc: dict[int, dict] = {}
+        model_name = self.model
+        stop_reason = "end_turn"
+        input_tokens = 0
+        output_tokens = 0
+
+        stream = self.client.chat.completions.create(**kwargs)
+
         for chunk in stream:
-            content = chunk.choices[0].delta.content
-            if content:
-                yield content
+            if chunk.model:
+                model_name = chunk.model
+
+            # Usage comes on the final chunk (with stream_options)
+            if chunk.usage:
+                input_tokens = chunk.usage.prompt_tokens
+                output_tokens = chunk.usage.completion_tokens
+
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+
+            # Finish reason
+            if choice.finish_reason:
+                if choice.finish_reason == "tool_calls":
+                    stop_reason = "tool_use"
+                elif choice.finish_reason == "length":
+                    stop_reason = "max_tokens"
+                else:
+                    stop_reason = "end_turn"
+
+            delta = choice.delta
+            if not delta:
+                continue
+
+            # Text content
+            if delta.content:
+                collected_text += delta.content
+                yield StreamDelta(type="text_delta", text=delta.content)
+
+            # Tool calls
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_acc:
+                        # New tool call starting
+                        tool_calls_acc[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                            "arguments_json": "",
+                        }
+                        if tc_delta.id and tc_delta.function and tc_delta.function.name:
+                            yield StreamDelta(
+                                type="tool_use_start",
+                                tool_call_id=tc_delta.id,
+                                tool_call_name=tc_delta.function.name,
+                            )
+                    # Accumulate arguments
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tool_calls_acc[idx]["arguments_json"] += tc_delta.function.arguments
+                        yield StreamDelta(
+                            type="tool_use_delta",
+                            text=tc_delta.function.arguments,
+                            tool_call_id=tool_calls_acc[idx]["id"],
+                        )
+
+        # Build the final AssistantTurn
+        content_blocks = []
+        if collected_text:
+            content_blocks.append(TextContent(text=collected_text))
+        for idx in sorted(tool_calls_acc.keys()):
+            tc = tool_calls_acc[idx]
+            stop_reason = "tool_use"
+            content_blocks.append(ToolUseContent(
+                id=tc["id"],
+                name=tc["name"],
+                arguments=json.loads(tc["arguments_json"]) if tc["arguments_json"] else {},
+            ))
+
+        if len(content_blocks) == 1 and isinstance(content_blocks[0], TextContent):
+            content = content_blocks[0].text
+        else:
+            content = content_blocks if content_blocks else ""
+
+        assistant_turn = AssistantTurn(
+            content=content,
+            model=model_name,
+            stop_reason=stop_reason,
+            usage=Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
+        yield StreamDelta(type="message_complete", assistant_turn=assistant_turn)
 
     def invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> AssistantTurn:
         openai_messages = self._to_openai_messages(messages)
@@ -165,6 +254,6 @@ class OpenAIModel(LLM):
             }
             for tool in tools
         ]
-    
+
     def compact(self):
         pass

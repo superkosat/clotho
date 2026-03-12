@@ -36,6 +36,7 @@ class ClothoREPL:
         self.rotating_phrases = False
         self.response_complete = asyncio.Event()
         self.active_profile = None
+        self.streaming = True
         self.loading_phrases = [
             "Thinking...",
             "Processing...",
@@ -106,7 +107,7 @@ class ClothoREPL:
         msg_type = message.get("type")
         data = message.get("data", {})
 
-        if msg_type == "agent.text":
+        if msg_type in ("agent.text", "agent.text_delta"):
             # Stop loading status when first text arrives
             if self.current_status:
                 self.rotating_phrases = False
@@ -238,7 +239,7 @@ class ClothoREPL:
                 else:
                     # Send to agent and show loading spinner
                     self.response_complete.clear()
-                    await self.ws_client.send_message(user_input)
+                    await self.ws_client.send_message(user_input, stream=self.streaming)
 
                     # Show loading status with first phrase
                     self.current_status = self.console.status(
@@ -339,11 +340,29 @@ class ClothoREPL:
             new_chat_id = self.command_handler.handle_chat(args)
             if new_chat_id and new_chat_id != self.chat_id:
                 await self._switch_chat(new_chat_id)
+        elif cmd == "stream":
+            self.handle_stream(args)
         elif cmd == "sandbox":
             self.command_handler.handle_sandbox(args)
         else:
             self.console.print(f"[red]Unknown command: /{cmd}[/red]")
             self.console.print("Type [cyan]/help[/cyan] for available commands")
+
+    def handle_stream(self, args: list[str]):
+        """Toggle or show streaming mode."""
+        if not args:
+            state = "[green]on[/green]" if self.streaming else "[yellow]off[/yellow]"
+            self.console.print(f"Streaming: {state}")
+            return
+
+        if args[0] == "on":
+            self.streaming = True
+            self.console.print("[green]Streaming enabled[/green]")
+        elif args[0] == "off":
+            self.streaming = False
+            self.console.print("[yellow]Streaming disabled[/yellow]")
+        else:
+            self.console.print("[red]Usage: /stream [on|off][/red]")
 
     def show_help(self):
         """Display help text."""
@@ -362,6 +381,8 @@ class ClothoREPL:
 [cyan]/chats[/cyan]                             List all chats
 [cyan]/chat new[/cyan]                          Create and switch to a new chat
 [cyan]/chat <id>[/cyan]                         Switch to an existing chat
+[cyan]/stream[/cyan]                            Show streaming status
+[cyan]/stream on|off[/cyan]                     Toggle response streaming
 [cyan]/sandbox[/cyan]                           Show sandbox status
 [cyan]/sandbox on|off[/cyan]                    Enable or disable the sandbox
 [cyan]/sandbox build[/cyan]                     Build the sandbox Docker image

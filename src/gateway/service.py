@@ -19,7 +19,7 @@ class AgentService:
         self.session = session
         self.ws = websocket
 
-    async def handle_run(self, message: str):
+    async def handle_run(self, message: str, stream: bool = False):
         """Start an agent run. Spawned as a task so the receive loop stays free."""
         if self.session.run_lock.locked():
             await self._send_event("agent.error", {
@@ -35,6 +35,7 @@ class AgentService:
                     user_input=message,
                     emit=self._send_event,
                     request_approval=self._request_approval,
+                    stream=stream,
                 )
             except Exception as e:
                 await self._send_event("agent.error", {
