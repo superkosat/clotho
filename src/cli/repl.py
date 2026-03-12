@@ -4,6 +4,8 @@ import asyncio
 import sys
 
 from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
 from rich.panel import Panel
 
 from cli.api_client import ClothoAPIClient
@@ -37,6 +39,8 @@ class ClothoREPL:
         self.response_complete = asyncio.Event()
         self.active_profile = None
         self.streaming = True
+        self._response_buffer = ""
+        self._live: Live | None = None
         self.loading_phrases = [
             "Thinking...",
             "Processing...",
@@ -114,9 +118,15 @@ class ClothoREPL:
                 self.current_status.stop()
                 self.current_status = None
 
-            # Stream text chunk
             text = data.get("text", "")
-            self.console.print(text, end="")
+            self._response_buffer += text
+
+            # Start Live display on first chunk, then update
+            if self._live is None:
+                self._live = Live(Markdown(self._response_buffer), console=self.console, auto_refresh=False)
+                self._live.start()
+            else:
+                self._live.update(Markdown(self._response_buffer), refresh=True)
 
         elif msg_type == "agent.tool_request":
             # Stop loading status if active
@@ -124,6 +134,11 @@ class ClothoREPL:
                 self.rotating_phrases = False
                 self.current_status.stop()
                 self.current_status = None
+            # Stop Live markdown display if active
+            if self._live is not None:
+                self._live.stop()
+                self._live = None
+            self._response_buffer = ""
 
             # Tool approval required - display all tools
             tool_calls = data.get("tool_calls", [])
@@ -156,6 +171,11 @@ class ClothoREPL:
                 self.rotating_phrases = False
                 self.current_status.stop()
                 self.current_status = None
+            # Stop Live markdown display if active
+            if self._live is not None:
+                self._live.stop()
+                self._live = None
+            self._response_buffer = ""
             # Print error
             error = data.get("message", "Unknown error")
             self.console.print(f"\n[red]Error: {error}[/red]")
@@ -169,8 +189,12 @@ class ClothoREPL:
                 self.current_status.stop()
                 self.current_status = None
 
-            # Agent finished - add newline after response text
-            self.console.print()  # Newline after agent's last output
+            # Stop Live markdown display
+            if self._live is not None:
+                self._live.stop()
+                self._live = None
+            self._response_buffer = ""
+
             stop_reason = data.get("stop_reason", "")
             model = data.get("model", "")
             self.console.print(f"[green]✓ Done[/green] [dim]({model} - {stop_reason})[/dim]")
@@ -184,6 +208,10 @@ class ClothoREPL:
                 self.rotating_phrases = False
                 self.current_status.stop()
                 self.current_status = None
+            if self._live is not None:
+                self._live.stop()
+                self._live = None
+            self._response_buffer = ""
             error_msg = data.get("message", "Unknown connection error")
             self.console.print(f"\n[red]⚠ WebSocket connection lost: {error_msg}[/red]")
             self.console.print("[yellow]The gateway may have restarted. Try /quit and restart.[/yellow]")
