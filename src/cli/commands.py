@@ -5,6 +5,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from cli.api_client import ClothoAPIClient
+from cli.theme import GREEN, PURPLE, DIM, ERROR_RED, WARN_AMBER
 
 
 class CommandHandler:
@@ -28,17 +29,17 @@ class CommandHandler:
             profiles = data.get("profiles", {})
 
             if not profiles:
-                self.console.print("[yellow]No profiles found[/yellow]")
+                self.console.print(f"[{WARN_AMBER}]No profiles found[/{WARN_AMBER}]")
                 return
 
-            table = Table(title="Model Profiles")
-            table.add_column("Name", style="cyan")
+            table = Table(title="Model Profiles", border_style=PURPLE)
+            table.add_column("Name", style=GREEN)
             table.add_column("Provider")
             table.add_column("Model")
-            table.add_column("Default", style="green")
+            table.add_column("Default", style=GREEN)
 
             for name, profile in profiles.items():
-                is_default = "✓" if name == default else ""
+                is_default = "✦" if name == default else ""
                 table.add_row(
                     name,
                     profile.get("provider", ""),
@@ -48,7 +49,7 @@ class CommandHandler:
 
             self.console.print(table)
         except Exception as e:
-            self.console.print(f"[red]Error: {e}[/red]")
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
 
     async def handle_profile(self, args: list[str], chat_id: str | None = None):
         """Handle profile subcommands.
@@ -68,23 +69,23 @@ class CommandHandler:
         elif subcommand == "use" and len(args) > 1:
             profile_name = args[1]
             if not chat_id:
-                self.console.print("[red]No active chat session[/red]")
+                self.console.print(f"[{ERROR_RED}]No active chat session[/{ERROR_RED}]")
                 return
             try:
                 self.api.set_active_profile(chat_id, profile_name)
-                self.console.print(f"[green]✓ Switched to profile: {profile_name}[/green]")
+                self.console.print(f"[{GREEN}]✦ Switched to profile: {profile_name}[/{GREEN}]")
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
         elif subcommand == "default" and len(args) > 1:
             profile_name = args[1]
             try:
                 self.api.set_default_profile(profile_name)
-                self.console.print(f"[green]✓ Set default profile: {profile_name}[/green]")
+                self.console.print(f"[{GREEN}]✦ Set default profile: {profile_name}[/{GREEN}]")
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
         else:
-            self.console.print("[red]Invalid profile command[/red]")
-            self.console.print("Usage: /profile [add|use <name>|default <name>]")
+            self.console.print(f"[{ERROR_RED}]Invalid profile command[/{ERROR_RED}]")
+            self.console.print(f"Usage: /profile [add|use <name>|default <name>]")
 
     async def add_profile(self):
         """Interactive profile creation."""
@@ -106,9 +107,9 @@ class CommandHandler:
                 profile["api_key"] = api_key
 
             self.api.create_profile(name, profile)
-            self.console.print(f"[green]✓ Created profile: {name}[/green]")
+            self.console.print(f"[{GREEN}]✦ Created profile: {name}[/{GREEN}]")
         except Exception as e:
-            self.console.print(f"[red]Error: {e}[/red]")
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
 
     def show_permissions(self):
         """Display current permissions."""
@@ -125,11 +126,15 @@ class CommandHandler:
                 for tool, level in overrides.items():
                     panel_content += f"  {tool}: {level}\n"
             else:
-                panel_content += "[dim]No tool overrides[/dim]"
+                panel_content += f"[{DIM}]No tool overrides[/{DIM}]"
 
-            self.console.print(Panel(panel_content, title="Permissions"))
+            self.console.print(Panel(
+                panel_content,
+                title=f"[bold {GREEN}]Permissions[/bold {GREEN}]",
+                border_style=PURPLE,
+            ))
         except Exception as e:
-            self.console.print(f"[red]Error: {e}[/red]")
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
 
     async def handle_permission(self, args: list[str]):
         """Handle permission subcommands.
@@ -154,7 +159,7 @@ class CommandHandler:
             mode = args[1]
             await self.set_permission_mode(mode)
         else:
-            self.console.print("[red]Invalid permission command[/red]")
+            self.console.print(f"[{ERROR_RED}]Invalid permission command[/{ERROR_RED}]")
             self.console.print("Usage:")
             self.console.print("  /permission                 Show current permissions")
             self.console.print("  /permission set <tool> <level>   Set tool override (allow/ask/deny)")
@@ -170,7 +175,7 @@ class CommandHandler:
         """
         valid_levels = ["allow", "ask", "deny"]
         if level not in valid_levels:
-            self.console.print(f"[red]Invalid level: {level}[/red]")
+            self.console.print(f"[{ERROR_RED}]Invalid level: {level}[/{ERROR_RED}]")
             self.console.print(f"Must be one of: {', '.join(valid_levels)}")
             return
 
@@ -184,18 +189,18 @@ class CommandHandler:
 
             # Save back
             self.api.update_permissions(perms.get("mode"), overrides)
-            self.console.print(f"[green]✓ Set {tool_name} → {level}[/green]")
+            self.console.print(f"[{GREEN}]✦ Set {tool_name} → {level}[/{GREEN}]")
         except Exception as e:
             error_msg = str(e)
-            self.console.print(f"[red]Error: {error_msg}[/red]")
+            self.console.print(f"[{ERROR_RED}]Error: {error_msg}[/{ERROR_RED}]")
 
             # If it's an invalid tool name error, show available tools
             if "Invalid tool name" in error_msg or "400" in error_msg:
                 try:
                     tools = self.api.get_available_tools()
-                    self.console.print(f"[yellow]Available tools: {', '.join(tools)}[/yellow]")
+                    self.console.print(f"[{WARN_AMBER}]Available tools: {', '.join(tools)}[/{WARN_AMBER}]")
                 except Exception:
-                    pass  # Ignore errors fetching tool list
+                    pass
 
     async def clear_tool_permission(self, tool_name: str):
         """Clear permission override for a specific tool.
@@ -210,7 +215,7 @@ class CommandHandler:
 
             # Check if override exists
             if tool_name not in overrides:
-                self.console.print(f"[yellow]No override set for: {tool_name}[/yellow]")
+                self.console.print(f"[{WARN_AMBER}]No override set for: {tool_name}[/{WARN_AMBER}]")
                 return
 
             # Remove the override
@@ -218,9 +223,9 @@ class CommandHandler:
 
             # Save back
             self.api.update_permissions(perms.get("mode"), overrides)
-            self.console.print(f"[green]✓ Cleared override for {tool_name}[/green]")
+            self.console.print(f"[{GREEN}]✦ Cleared override for {tool_name}[/{GREEN}]")
         except Exception as e:
-            self.console.print(f"[red]Error: {e}[/red]")
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
 
     async def set_permission_mode(self, mode: str):
         """Set global permission mode.
@@ -230,7 +235,7 @@ class CommandHandler:
         """
         valid_modes = ["interactive", "autonomous", "readonly"]
         if mode not in valid_modes:
-            self.console.print(f"[red]Invalid mode: {mode}[/red]")
+            self.console.print(f"[{ERROR_RED}]Invalid mode: {mode}[/{ERROR_RED}]")
             self.console.print(f"Must be one of: {', '.join(valid_modes)}")
             return
 
@@ -241,9 +246,9 @@ class CommandHandler:
 
             # Update mode
             self.api.update_permissions(mode, overrides)
-            self.console.print(f"[green]✓ Set mode to: {mode}[/green]")
+            self.console.print(f"[{GREEN}]✦ Set mode to: {mode}[/{GREEN}]")
         except Exception as e:
-            self.console.print(f"[red]Error: {e}[/red]")
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
 
     def list_chats(self):
         """Display chat list as table."""
@@ -251,18 +256,18 @@ class CommandHandler:
             chats = self.api.list_chats()
 
             if not chats:
-                self.console.print("[yellow]No chats found[/yellow]")
+                self.console.print(f"[{WARN_AMBER}]No chats found[/{WARN_AMBER}]")
                 return
 
-            table = Table(title="Chat Sessions")
-            table.add_column("Chat ID", style="cyan")
+            table = Table(title="Chat Sessions", border_style=PURPLE)
+            table.add_column("Chat ID", style=GREEN)
 
             for chat in chats:
                 table.add_row(chat["chat_id"])
 
             self.console.print(table)
         except Exception as e:
-            self.console.print(f"[red]Error: {e}[/red]")
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
 
     def handle_chat(self, args: list[str]) -> str | None:
         """Handle chat subcommands. Returns new chat_id if switched, else None.
@@ -279,10 +284,10 @@ class CommandHandler:
         if subcommand == "new":
             try:
                 chat_id = self.api.create_chat()
-                self.console.print(f"[green]Created new chat: {chat_id}[/green]")
+                self.console.print(f"[{GREEN}]Created new chat: {chat_id}[/{GREEN}]")
                 return chat_id
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
                 return None
         else:
             # Treat the argument as a chat ID to switch to
@@ -291,12 +296,12 @@ class CommandHandler:
                 chats = self.api.list_chats()
                 chat_ids = [c["chat_id"] for c in chats]
                 if chat_id not in chat_ids:
-                    self.console.print(f"[red]Chat not found: {chat_id}[/red]")
+                    self.console.print(f"[{ERROR_RED}]Chat not found: {chat_id}[/{ERROR_RED}]")
                     return None
-                self.console.print(f"[green]Switched to chat: {chat_id}[/green]")
+                self.console.print(f"[{GREEN}]Switched to chat: {chat_id}[/{GREEN}]")
                 return chat_id
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
                 return None
 
     def handle_sandbox(self, args: list[str]) -> None:
@@ -308,32 +313,32 @@ class CommandHandler:
         if not args:
             try:
                 enabled = self.api.get_sandbox()
-                state = "[green]enabled[/green]" if enabled else "[yellow]disabled[/yellow]"
+                state = f"[{GREEN}]enabled[/{GREEN}]" if enabled else f"[{WARN_AMBER}]disabled[/{WARN_AMBER}]"
                 self.console.print(f"Sandbox: {state}")
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
             return
 
         subcommand = args[0]
         if subcommand == "on":
             try:
                 self.api.set_sandbox(True)
-                self.console.print("[green]Sandbox enabled[/green]")
+                self.console.print(f"[{GREEN}]Sandbox enabled[/{GREEN}]")
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
         elif subcommand == "off":
             try:
                 self.api.set_sandbox(False)
-                self.console.print("[yellow]Sandbox disabled[/yellow]")
+                self.console.print(f"[{WARN_AMBER}]Sandbox disabled[/{WARN_AMBER}]")
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
         elif subcommand == "build":
             try:
-                self.console.print("[dim]Building sandbox image (this may take a few minutes)...[/dim]")
+                self.console.print(f"[{DIM}]Building sandbox image (this may take a few minutes)...[/{DIM}]")
                 self.api.build_sandbox()
-                self.console.print("[green]Sandbox image built successfully[/green]")
+                self.console.print(f"[{GREEN}]Sandbox image built successfully[/{GREEN}]")
             except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
+                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
         else:
-            self.console.print("[red]Invalid sandbox command[/red]")
+            self.console.print(f"[{ERROR_RED}]Invalid sandbox command[/{ERROR_RED}]")
             self.console.print("Usage: /sandbox [on|off|build]")
