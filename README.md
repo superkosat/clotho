@@ -1,5 +1,9 @@
 # Clotho
 
+<p align="center">
+  <img src="docs/clotho.png" alt="Clotho" width="80%">
+</p>
+
 A terminal-based AI coding agent. Clotho runs a local gateway server that manages agent sessions, tool execution, and model routing. You can interact with it through a rich terminal REPL, or implement your own client.
 
 ## Installation
