@@ -20,28 +20,20 @@ class AgentService:
         self.ws = websocket
 
     async def handle_run(self, message: str, stream: bool = False):
-        """Start an agent run. Spawned as a task so the receive loop stays free."""
-        if self.session.run_lock.locked():
+        """Execute an agent run. Called by the dispatcher — guaranteed not concurrent."""
+        self.session.cancel_event.clear()
+        try:
+            await self.session.controller.run(
+                user_input=message,
+                emit=self._send_event,
+                request_approval=self._request_approval,
+                stream=stream,
+            )
+        except Exception as e:
             await self._send_event("agent.error", {
-                "code": "run_in_progress",
-                "message": "A run is already active",
+                "code": "internal_error",
+                "message": str(e),
             })
-            return
-
-        async with self.session.run_lock:
-            self.session.cancel_event.clear()
-            try:
-                await self.session.controller.run(
-                    user_input=message,
-                    emit=self._send_event,
-                    request_approval=self._request_approval,
-                    stream=stream,
-                )
-            except Exception as e:
-                await self._send_event("agent.error", {
-                    "code": "internal_error",
-                    "message": str(e),
-                })
 
     async def _send_event(self, event_type: str, data: dict):
         """emit callback — serialize and send over WebSocket."""
@@ -123,10 +115,25 @@ class AgentService:
             self.session.pending_approval.set_result(data)
 
     def handle_cancel(self):
-        """Signal cancellation — abort the run and reject any pending approval."""
+        """Stop the current run and reject any pending approval. Queued runs proceed."""
         self.session.cancel_event.set()
         if self.session.pending_approval and not self.session.pending_approval.done():
             self.session.pending_approval.set_result({"approved": False})
+
+    def handle_panic(self):
+        """
+        Stop the current run, reject any pending approval, and drain the queue.
+
+        Stronger than cancel: nothing queued will start after this. The
+        underlying LLM/tool thread still runs to completion (Python threads
+        cannot be forcibly killed), but results are discarded and no further
+        work is dispatched. Full mid-execution preemption requires cooperative
+        cancel_event checkpoints in core.py (Feature 1 / Panic Shutdown).
+        """
+        self.session.cancel_event.set()
+        if self.session.pending_approval and not self.session.pending_approval.done():
+            self.session.pending_approval.set_result({"approved": False})
+        self.session.dispatcher.drain()
 
     def handle_disconnect(self):
         """Client disconnected mid-run."""

@@ -11,6 +11,7 @@ from agent.tools.schemas.bash import bash_tool
 from agent.tools.schemas.read import read_tool
 from agent.tools.schemas.write import write_tool
 from agent.tools.schemas.edit import edit_tool
+from gateway.dispatcher import EventDispatcher
 from gateway.services.profile_service import ProfileService
 
 DEFAULT_TOOLS = [
@@ -25,7 +26,7 @@ class SessionState:
 
     def __init__(self, controller: ClothoController, current_profile_name: str | None = None):
         self.controller = controller
-        self.run_lock = asyncio.Lock()
+        self.dispatcher = EventDispatcher()
         self.cancel_event = asyncio.Event()
         self.pending_approval: asyncio.Future | None = None
         self.current_profile_name = current_profile_name  # Track active profile
@@ -96,8 +97,27 @@ class SessionManager:
     def remove_session(self, chat_id: UUID):
         state = self._sessions.get(chat_id)
         if state:
-            state.controller._cleanup_sandbox()  # Cleanup sandbox
+            state.dispatcher.stop()
+            state.controller._cleanup_sandbox()
         self._sessions.pop(chat_id, None)
+
+    def panic_all(self) -> int:
+        """
+        Cancel all active sessions immediately and drain their queues.
+
+        Sets each session's cancel_event, resolves any pending tool approval
+        as denied, cancels the current run task, and drains all queued work so
+        nothing else starts. Returns the number of sessions affected.
+        """
+        with self._lock:
+            sessions = list(self._sessions.values())
+        for state in sessions:
+            state.cancel_event.set()
+            if state.pending_approval and not state.pending_approval.done():
+                state.pending_approval.set_result({"approved": False})
+            state.dispatcher.cancel_current()
+            state.dispatcher.drain()
+        return len(sessions)
 
     def switch_profile(self, chat_id: UUID, profile_name: str) -> None:
         """Switch the active model profile for a session.

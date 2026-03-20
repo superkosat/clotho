@@ -9,6 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 logger = logging.getLogger(__name__)
 
 from gateway.auth.token import verify_token
+from gateway.dispatcher import GatewayEvent, EventPriority
 from gateway.models.events import parse_client_event
 from gateway.service import AgentService
 
@@ -31,8 +32,12 @@ async def agent_websocket(websocket: WebSocket, chat_id: UUID):
         await websocket.close(code=4004, reason="Chat not found")
         return
 
+    # Start the dispatcher consumer loop for this session. Idempotent — safe
+    # on reconnect. The dispatcher persists for the lifetime of the session;
+    # this just ensures the consumer task is running.
+    session.dispatcher.start()
+
     service = AgentService(session, websocket)
-    run_task: asyncio.Task | None = None
 
     try:
         while True:
@@ -41,7 +46,6 @@ async def agent_websocket(websocket: WebSocket, chat_id: UUID):
             try:
                 event_type, data = parse_client_event(raw)
             except ValueError as e:
-                # Invalid event format - send error but don't disconnect
                 await websocket.send_json({
                     "type": "agent.error",
                     "data": {
@@ -54,20 +58,34 @@ async def agent_websocket(websocket: WebSocket, chat_id: UUID):
 
             match event_type:
                 case "run":
-                    run_task = asyncio.create_task(
-                        service.handle_run(data["message"], stream=data.get("stream", False))
+                    # Capture loop-local values to avoid closure over the
+                    # loop variable `data` being mutated in later iterations.
+                    msg = data["message"]
+                    stream = data.get("stream", False)
+                    event = GatewayEvent(
+                        type="run",
+                        data=data,
+                        priority=EventPriority.NORMAL,
+                        source="websocket",
+                    )
+                    session.dispatcher.submit(
+                        event,
+                        lambda m=msg, s=stream: service.handle_run(m, s),
                     )
                 case "tool_approval":
+                    # Tool approvals resolve the pending future in the currently
+                    # running handler — they must never be queued.
                     service.handle_tool_approval(data)
                 case "cancel":
-                    service.handle_cancel()
+                    # Critical: cancel current run. Queued runs still proceed.
+                    session.dispatcher.execute_critical(service.handle_cancel)
+                case "panic":
+                    # Critical: cancel current run AND drain the queue.
+                    # Nothing queued will start after this.
+                    session.dispatcher.execute_critical(service.handle_panic)
 
     except WebSocketDisconnect:
-        service.handle_disconnect()
-        if run_task and not run_task.done():
-            run_task.cancel()
+        session.dispatcher.execute_critical(service.handle_disconnect)
     except Exception as e:
         logger.error("WebSocket error: %s\n%s", e, traceback.format_exc())
-        service.handle_disconnect()
-        if run_task and not run_task.done():
-            run_task.cancel()
+        session.dispatcher.execute_critical(service.handle_disconnect)

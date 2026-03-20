@@ -266,24 +266,113 @@ The main risk is premature abstraction — building a dispatcher before there ar
 
 ---
 
+## Feature 6: CLI Initial Prompt Argument
+
+### What it is
+Pass a prompt directly on the command line and have the agent begin immediately with it, rather than waiting for the first interactive input:
+
+```
+clotho "summarize the files in this directory"
+```
+
+The session opens, the prompt is sent as the first message, the response streams into the terminal, and the REPL continues running for follow-up input.
+
+### Why it matters
+Currently the CLI always opens a blank REPL and waits. There's no way to script or chain invocations without interactive input, and even casual use requires opening the REPL before sending anything. Pre-seeding the first message reduces friction and opens the door to scripted use patterns.
+
+### What needs to change
+
+**Core changes required: No.** This is a pure CLI entrypoint change.
+
+| Layer | Change | Scope |
+|-------|--------|-------|
+| **CLI (`src/cli/main.py`)** | Accept an optional positional argument: `clotho [prompt]`. If provided, auto-send it as the first message after the WebSocket session is established, before entering the REPL loop. | Trivial |
+| **REPL loop** | After sending the initial prompt and receiving the response, continue into the normal interactive loop as usual. The user sees the response and can follow up. No change to the loop itself. | None |
+
+**Design decisions needed:**
+1. **Multi-word prompts** — The positional argument is a single string (quoted by the shell). `clotho "do this thing"` works; `clotho do this thing` should either join the remaining args or show a helpful error.
+2. **Stdin fallback** — `echo "summarize this" | clotho` could work if no positional arg is given and stdin is not a TTY. Makes the CLI composable in shell pipelines without requiring `-p`. Optional for the initial implementation.
+3. **Chat targeting** — Does `clotho "prompt"` always start a new chat, or respect `--chat` / last-used-chat as normal? Consistent with normal REPL behavior (i.e., whatever the REPL defaults to) is simplest.
+
+### Cost/Benefit
+- **Cost:** Trivial. A few lines in `main.py` argument parsing.
+- **Benefit:** Medium. Makes Clotho significantly more composable from the shell, and is a prerequisite for non-interactive mode (Feature 7) feeling natural to use.
+- **Core logic changes:** None.
+
+---
+
+## Feature 7: Non-Interactive / Print Mode (`-p`)
+
+### What it is
+A headless execution mode that runs a single agent turn, outputs the result to stdout, and exits — no REPL, no interactive prompts, no UI.
+
+```
+clotho -p "what is the current date"
+clotho -p "summarize ~/notes.txt"
+echo "translate to French: hello" | clotho -p
+```
+
+In this mode, tool approval is handled automatically in **don't-ask mode**: tools permitted by the active permission profile are auto-approved; tools not permitted are auto-denied. The agent runs to completion and exits with code 0 on success, non-zero on error.
+
+### Why it matters
+This unlocks Clotho as a scriptable Unix tool. The agent can be embedded in shell pipelines, cron jobs, CI scripts, or called from other programs. Without this mode, any programmatic use requires either the Discord bridge (heavy dependency, designed for chat) or a raw WebSocket client. `-p` provides a thin, composable CLI surface for automation.
+
+### What needs to change
+
+**Core changes required: No.** Don't-ask mode is a tool approval policy, not a core change. The agent's execution model is unchanged.
+
+| Layer | Change | Scope |
+|-------|--------|-------|
+| **CLI (`src/cli/main.py`)** | Add `-p` / `--print` flag. When set: skip REPL setup, don't render the TUI, stream the agent response directly to stdout, call `sys.exit()` when `turn_complete` is received. The positional prompt argument (Feature 6) becomes required in this mode. Stdin is read as the prompt if no positional arg is given and stdin is not a TTY. | Small |
+| **Tool approval handler** | In `-p` mode, replace the interactive approval prompt with automatic policy-based approval: call `GET /api/permissions` to retrieve the active permission profile, check if the requested tool is in the allowed list, send `approve` or `deny` accordingly. No user prompt, no blocking. | Small |
+| **Output format** | In `-p` mode, strip all ANSI / rich formatting — only the raw agent text response goes to stdout. Errors go to stderr. This ensures output is clean for piping: `clotho -p "list the files" | grep ".py"`. | Small |
+| **Exit codes** | `0` = run completed with a response. `1` = agent error (e.g., tool loop failed, LLM error). `2` = usage error (no prompt provided). Makes `-p` mode behave like a standard Unix tool. | Trivial |
+
+**Design decisions needed:**
+1. **Permission policy source** — Don't-ask mode checks the active profile's allowed tools. But what is "allowed"? Three options: (a) use the same permission profile as interactive mode (whatever the user configured), (b) a separate `-p`-specific profile that defaults to more restrictive allow-lists, (c) pass an explicit `--allow` list on the command line. **Recommendation:** Option (a) to start — use the existing permission profile unchanged. This is the principle of least surprise: `-p` behaves like an unattended interactive session. Option (c) can be added later.
+
+2. **What happens on tool denial?** If a tool is denied, the agent receives a denial response and may request a different tool or produce a degraded answer. This is correct behavior — the agent adapts. The user should be aware that `-p` mode with a restrictive permission profile may produce less useful output.
+
+3. **Timeout** — In interactive mode, a hung agent just waits for the user. In `-p` mode, a hung agent blocks a script indefinitely. A configurable `--timeout N` (seconds, default: 300) that exits with code 1 if the agent hasn't completed is important for scripted use.
+
+4. **Multi-turn in `-p`?** `-p` is explicitly single-turn. If the agent's response implies follow-up is needed, the user handles that at the shell level by running `clotho -p` again. This keeps the mode simple and composable.
+
+5. **Chat persistence in `-p`** — Does a `-p` run create a persistent chat that can be continued later in the REPL? Options: (a) always ephemeral — no chat stored, (b) stored like any chat, addressable via `--chat`. **Recommendation:** Ephemeral by default, with `--chat <id>` to opt into persistence. This keeps `-p` mode clean for pipelines while allowing stateful scripted workflows.
+
+### Interaction with other features
+
+- **Feature 6 (initial prompt):** `-p` requires a prompt argument, so Feature 6's positional arg is a prerequisite. They should be implemented together or Feature 6 first.
+- **Feature 5 (dispatcher):** `-p` is a client-side feature. No dispatcher changes needed, but the permission-based auto-approval will naturally slot into the dispatcher's event handling if it's in place.
+- **Hooks/Heartbeat (Feature 3):** The scheduler (Feature 3) could use `-p` mode internally for simple hook invocations rather than implementing its own WebSocket client. This is a useful synergy to keep in mind during scheduler design.
+
+### Cost/Benefit
+- **Cost:** Low-medium. CLI flag parsing, a headless execution path in the REPL, an auto-approval handler. No gateway or core changes.
+- **Benefit:** High for automation use cases. Makes Clotho composable with standard Unix tooling. Enables scripted workflows, CI integrations, and provides the simplest possible API for programmatic use without standing up a full bridge.
+- **Core logic changes:** None.
+
+---
+
 ## Implementation Priority Recommendation
 
 | Priority | Feature | Rationale |
 |----------|---------|-----------|
 | **1** | Event Dispatcher | Foundational. Provides the coordination substrate that Panic and Hooks both need. Small scope (~150 lines), no core logic changes, but dramatically simplifies the implementation of Features 2 and 5. Building Panic without the dispatcher means writing ad-hoc plumbing that gets replaced later. Build the dispatcher first, then Panic becomes trivial. |
 | **2** | Panic/Emergency Shutdown | Safety feature. With the dispatcher in place, this is just: (a) define `panic` as a Critical event, (b) add cancellation checkpoints in `run()` and `_stream_and_emit()`. The dispatcher handles the routing; the agent core handles the stopping. |
-| **3** | Context Compaction | Correctness feature. Without it, every conversation has an invisible ceiling. The Ollama 4K failure you saw will happen to every model eventually. Must be in place before hooks/heartbeat (Feature 5), because scheduled jobs over days/weeks will exhaust context. |
-| **4** | Interactive Bridge Setup | Quality-of-life. Low cost, reduces setup friction. Good to do before adding more bridges. |
-| **5** | Hooks/Heartbeat | Most ambitious in scope but lowest urgency. Depends on context compaction being solid (long-running persistent chats). With the dispatcher in place, the scheduler just submits Background-priority events — zero contention logic needed. |
+| **3** | CLI Initial Prompt + Non-Interactive Mode | Both features are trivial in scope (pure CLI layer, no core changes) and should be implemented together since `-p` requires a prompt argument. Delivering these early maximizes composability with scripts and the scheduler (Feature 6) can reuse `-p` mode internally. |
+| **4** | Context Compaction | Correctness feature. Without it, every conversation has an invisible ceiling. The Ollama 4K failure you saw will happen to every model eventually. Must be in place before hooks/heartbeat (Feature 6), because scheduled jobs over days/weeks will exhaust context. |
+| **5** | Interactive Bridge Setup | Quality-of-life. Low cost, reduces setup friction. Good to do before adding more bridges. |
+| **6** | Hooks/Heartbeat | Most ambitious in scope but lowest urgency. Depends on context compaction being solid (long-running persistent chats). With the dispatcher in place, the scheduler just submits Background-priority events — zero contention logic needed. The scheduler can use `-p` mode's auto-approval logic as a reference for unattended tool handling. |
 
 ---
 
 ## Core Logic Impact Summary
 
-| Feature | Agent Core | Gateway | Providers | Bridges | New Modules |
-|---------|-----------|---------|-----------|---------|-------------|
+| Feature | Agent Core | Gateway | Providers | Bridges/CLI | New Modules |
+|---------|-----------|---------|-----------|-------------|-------------|
 | Event Dispatcher | None | Refactor `agent.py` handler to submit events; `SessionState` owns dispatcher | None | None | `src/gateway/dispatcher.py` |
 | Panic Shutdown | Cancellation checkpoints in `run()` and `_stream_and_emit()` | Critical event type in dispatcher | None | Panic codeword parsing | None |
+| CLI Initial Prompt | None | None | None | Positional arg in `main.py` | None |
+| Non-Interactive Mode (`-p`) | None | None | None | Headless execution path, auto-approval handler, stdout output, exit codes | None |
 | Context Compaction | Pre-invoke size check, compaction trigger | Profile switching guard | `compact()` implementation × 3 | None | None |
 | Hooks/Heartbeat | None | None | None | Scheduler integration | `src/scheduler/` |
 | Bridge Setup | None | None | None | None | `src/channels/*/setup.py`, CLI subcommands |

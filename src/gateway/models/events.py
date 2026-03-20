@@ -66,7 +66,7 @@ def parse_client_event(raw: dict) -> tuple[str, dict]:
     event_type = raw.get("type")
     data = raw.get("data", {})
 
-    if event_type not in ("run", "tool_approval", "cancel"):
+    if event_type not in ("run", "tool_approval", "cancel", "panic"):
         raise ValueError(f"Unknown client event type: {event_type}")
 
     if event_type == "run":
