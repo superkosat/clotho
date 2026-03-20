@@ -262,6 +262,25 @@ class ClothoAPIClient:
         )
         _handle_response(response)
 
+    # Control endpoints
+
+    def panic_chat(self, chat_id: str) -> None:
+        """Cancel the active run and drain queued work for a session."""
+        response = requests.post(
+            f"{self.base_url}/api/chats/{chat_id}/panic",
+            headers=self.headers,
+        )
+        _handle_response(response)
+
+    def panic_all(self) -> int:
+        """Cancel all active sessions and drain their queues. Returns sessions affected."""
+        response = requests.post(
+            f"{self.base_url}/api/panic",
+            headers=self.headers,
+        )
+        _handle_response(response)
+        return response.json().get("sessions_affected", 0)
+
     def get_available_tools(self) -> list[str]:
         """Get list of available tool names.
 

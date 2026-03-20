@@ -27,6 +27,11 @@ class BridgeConfig:
     allowed_guild_ids: list[str] = field(default_factory=list)    # str IDs or "*"
     allowed_channel_ids: list[str] = field(default_factory=list)  # str IDs or "*"
 
+    # Emergency stop codewords. Checked before routing to the agent.
+    # Empty string disables the codeword.
+    stop_codeword: str = "!stop"         # cancel current session run, queue proceeds
+    stopall_codeword: str = "!stopall"   # cancel all sessions and drain queues (global)
+
 
 def _load_gateway_token() -> str:
     """Fall back to the gateway token stored by `clotho setup`."""
@@ -69,4 +74,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> BridgeConfig:
         denial_message=dc.get("denial_message", ""),
         allowed_guild_ids=[str(x) for x in dc.get("allowed_guild_ids", [])],
         allowed_channel_ids=[str(x) for x in dc.get("allowed_channel_ids", [])],
+        stop_codeword=dc.get("stop_codeword", "!stop"),
+        stopall_codeword=dc.get("stopall_codeword", "!stopall"),
     )

@@ -74,6 +74,33 @@ class DiscordBridge:
         if not text:
             return
 
+        # Check for emergency stop codewords before routing to the agent.
+        # These are processed immediately regardless of session state.
+        if self.config.stopall_codeword and text.strip() == self.config.stopall_codeword:
+            _log("!stopall received — panicking all sessions")
+            try:
+                affected = await asyncio.to_thread(self.api.panic_all)
+                await message.reply(f"Stopped all active sessions ({affected} affected).")
+            except Exception as exc:
+                _log(f"panic_all failed: {exc}")
+                await message.reply("Failed to stop all sessions.")
+            return
+
+        if self.config.stop_codeword and text.strip() == self.config.stop_codeword:
+            session_key = self._session_key(message)
+            chat_id = self.session_map.get(session_key)
+            if chat_id:
+                _log(f"!stop received — panicking session {chat_id}")
+                try:
+                    await asyncio.to_thread(self.api.panic_chat, chat_id)
+                    await message.reply("Stopped.")
+                except Exception as exc:
+                    _log(f"panic_chat failed: {exc}")
+                    await message.reply("Failed to stop session.")
+            else:
+                await message.reply("No active session to stop.")
+            return
+
         session_key = self._session_key(message)
         _log(f"Message from {message.author}: {text[:80]!r}")
 
@@ -135,6 +162,9 @@ class DiscordBridge:
                     else:
                         _log("Auto-denying tool request")
                         asyncio.create_task(ws.deny_tools())
+                case "agent.cancelled":
+                    _log("Run cancelled")
+                    done.set()
                 case "agent.error":
                     msg = data.get("data", {}).get("message", "Unknown error")
                     _log(f"Agent error event: {msg}")

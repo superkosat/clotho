@@ -4,16 +4,64 @@ import traceback
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
+from gateway.auth.dependencies import require_token
 from gateway.auth.token import verify_token
 from gateway.dispatcher import GatewayEvent, EventPriority
 from gateway.models.events import parse_client_event
 from gateway.service import AgentService
 
 router = APIRouter()
+
+
+@router.post("/api/chats/{chat_id}/cancel", dependencies=[Depends(require_token)])
+async def cancel_chat(chat_id: UUID, request: Request):
+    """
+    Cancel the active run for a session. Queued runs proceed after this.
+    Safe to call from any transport — REST, bridge, scheduler.
+    """
+    manager = request.app.state.session_manager
+    session = manager.get_session(chat_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not active")
+
+    session.cancel_event.set()
+    if session.pending_approval and not session.pending_approval.done():
+        session.pending_approval.set_result({"approved": False})
+    session.dispatcher.cancel_current()
+    return {"cancelled": True}
+
+
+@router.post("/api/chats/{chat_id}/panic", dependencies=[Depends(require_token)])
+async def panic_chat(chat_id: UUID, request: Request):
+    """
+    Cancel the active run and drain all queued work for a session.
+    Nothing further will execute until a new run is submitted.
+    """
+    manager = request.app.state.session_manager
+    session = manager.get_session(chat_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not active")
+
+    session.cancel_event.set()
+    if session.pending_approval and not session.pending_approval.done():
+        session.pending_approval.set_result({"approved": False})
+    session.dispatcher.cancel_current()
+    session.dispatcher.drain()
+    return {"panicked": True}
+
+
+@router.post("/api/panic", dependencies=[Depends(require_token)])
+async def panic_all(request: Request):
+    """
+    Cancel all active sessions and drain their queues (global stop-all).
+    """
+    manager = request.app.state.session_manager
+    count = manager.panic_all()
+    return {"panicked": True, "sessions_affected": count}
 
 
 @router.websocket("/ws/{chat_id}")

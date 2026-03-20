@@ -28,7 +28,17 @@ class AgentService:
                 emit=self._send_event,
                 request_approval=self._request_approval,
                 stream=stream,
+                cancel_event=self.session.cancel_event,
             )
+        except asyncio.CancelledError:
+            # Run was cancelled (via cancel_event checkpoint or direct task cancellation).
+            # Notify the client so it doesn't hang waiting for turn_complete.
+            try:
+                await self._send_event("agent.cancelled", {
+                    "message": "Run was cancelled",
+                })
+            except Exception:
+                pass  # WebSocket may already be closed
         except Exception as e:
             await self._send_event("agent.error", {
                 "code": "internal_error",

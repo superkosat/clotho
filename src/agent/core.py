@@ -41,6 +41,7 @@ class ClothoController():
         emit: Callable[[str, dict], Awaitable[None]],
         request_approval: Callable[[list[dict]], Awaitable[dict[str, str]]],
         stream: bool = False,
+        cancel_event: asyncio.Event | None = None,
     ):
         """
         Full agent loop. Invokes model, handles tool use cycles, and
@@ -50,11 +51,21 @@ class ClothoController():
         request_approval(tool_calls) — evaluate per-tool permissions, returns
             dict mapping tool call IDs to "allow" or "deny"
         stream — when True, emit incremental text_delta events as tokens arrive
+        cancel_event — when set, the loop exits at the next checkpoint and
+            raises CancelledError. The underlying LLM/tool thread completes
+            naturally (Python threads cannot be interrupted), but its result
+            is discarded and no further work is dispatched.
         """
+
+        def _check_cancelled():
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Run cancelled")
+
         turn = UserTurn(content=user_input)
 
+        _check_cancelled()
         if stream:
-            response = await self._stream_and_emit(turn, emit)
+            response = await self._stream_and_emit(turn, emit, cancel_event)
         else:
             response = await asyncio.to_thread(self.invoke, turn)
             await self._emit_content(response, emit)
@@ -63,6 +74,8 @@ class ClothoController():
         consecutive_denials = 0
         max_consecutive_denials = 3
         while response.stop_reason == "tool_use":
+            _check_cancelled()
+
             tool_uses = [b for b in response.content if isinstance(b, ToolUseContent)]
 
             tool_call_dicts = [
@@ -71,10 +84,16 @@ class ClothoController():
             ]
             verdicts = await request_approval(tool_call_dicts)
 
+            # Approval wait is a natural cancellation point (cancel resolves
+            # the pending_approval future as denied, which returns here).
+            _check_cancelled()
+
             # Process each tool individually based on its verdict
             all_denied = all(verdicts.get(t.id) != "allow" for t in tool_uses)
             tool_results = []
             for tool_use in tool_uses:
+                _check_cancelled()
+
                 verdict = verdicts.get(tool_use.id, "user_deny")
 
                 if verdict == "allow":
@@ -110,10 +129,12 @@ class ClothoController():
             else:
                 consecutive_denials = 0
 
+            _check_cancelled()
+
             # Re-invoke with tool results (including denials, so the model can adapt)
             tool_turn = ToolTurn(content=tool_results)
             if stream:
-                response = await self._stream_and_emit(tool_turn, emit)
+                response = await self._stream_and_emit(tool_turn, emit, cancel_event)
             else:
                 response = await asyncio.to_thread(self.invoke, tool_turn)
                 await self._emit_content(response, emit)
@@ -276,23 +297,39 @@ class ClothoController():
         self,
         turn: UserTurn | ToolTurn,
         emit: Callable[[str, dict], Awaitable[None]],
+        cancel_event: asyncio.Event | None = None,
     ) -> AssistantTurn:
         """
         Run stream_invoke in a thread, forwarding deltas to the client via
         emit as they arrive. Returns the final AssistantTurn.
+
+        When cancel_event is set the consumer loop raises CancelledError at
+        the next 100ms poll boundary. The producer thread stops pulling deltas
+        from the LLM stream on its next iteration check, but may not exit
+        immediately if the provider is blocked mid-chunk. The thread always
+        finishes naturally — results after cancellation are discarded.
         """
         q: queue.Queue[StreamDelta | None] = queue.Queue()
 
         def _produce():
             for delta in self.stream_invoke(turn):
+                if cancel_event and cancel_event.is_set():
+                    break  # stop pulling from the LLM stream
                 q.put(delta)
-            q.put(None)  # sentinel
+            q.put(None)  # sentinel — always sent so consumer never hangs
 
         thread = asyncio.get_event_loop().run_in_executor(None, _produce)
 
         assistant_turn = None
         while True:
-            delta = await asyncio.to_thread(q.get)
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Stream cancelled")
+            try:
+                # Use a short timeout so cancel_event is polled regularly
+                # even when the producer is blocked mid-inference or mid-tool.
+                delta = await asyncio.to_thread(q.get, timeout=0.1)
+            except queue.Empty:
+                continue  # timeout — loop back to check cancel_event
             if delta is None:
                 break
             if delta.type == "text_delta":
@@ -310,7 +347,7 @@ class ClothoController():
             elif delta.type == "message_complete":
                 assistant_turn = delta.assistant_turn
 
-        await thread  # ensure producer finished
+        await thread  # ensure producer thread has exited
         return assistant_turn
     
     def register_tools(self, tools: list[Tool]):
