@@ -25,16 +25,20 @@ from cli.ws_client import ClothoWebSocketClient
 class ClothoREPL:
     """Rich-based REPL for Clotho agent interaction."""
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, initial_prompt: str | None = None, chat_id: str | None = None):
         """Initialize REPL.
 
         Args:
             host: Gateway host address
             port: Gateway port number
+            initial_prompt: Optional prompt to send automatically on startup
+            chat_id: Optional existing chat ID to resume
         """
         self.console = Console(theme=CLOTHO_THEME)
         self.host = host
         self.port = port
+        self.initial_prompt = initial_prompt
+        self._requested_chat_id = chat_id
         self.token = None
         self.chat_id = None
         self.api_client = None
@@ -80,8 +84,20 @@ class ClothoREPL:
 
     async def start_session(self):
         """Create or resume chat session."""
-        # Create new chat
-        self.chat_id = self.api_client.create_chat()
+        if self._requested_chat_id:
+            # Validate and resume existing chat
+            chats = self.api_client.list_chats()
+            chat_ids = [c["chat_id"] for c in chats]
+            if self._requested_chat_id not in chat_ids:
+                from exceptions import SystemException
+                raise SystemException(
+                    message=f"Chat not found: {self._requested_chat_id}",
+                    exit_code=2
+                )
+            self.chat_id = self._requested_chat_id
+        else:
+            # Create new chat
+            self.chat_id = self.api_client.create_chat()
 
         # Track the initial profile (set by default on session creation)
         try:
@@ -279,6 +295,9 @@ class ClothoREPL:
         self.console.print(hints, justify="center")
         self.console.print()
 
+        if self.initial_prompt:
+            await self._send_and_wait(self.initial_prompt)
+
         while self.running:
             try:
                 # Get input with escape-to-cancel hint
@@ -291,62 +310,7 @@ class ClothoREPL:
                 if user_input.startswith("/"):
                     await self.handle_command(user_input)
                 else:
-                    # Send to agent and show particle animation
-                    self.response_complete.clear()
-                    await self.ws_client.send_message(user_input, stream=self.streaming)
-
-                    # Start particle spinner
-                    self.spinner = ParticleSpinner(
-                        self.console, self.loading_phrases[0]
-                    )
-                    self.spinner.start()
-
-                    # Start phrase rotation in background
-                    self.rotating_phrases = True
-                    rotation_task = asyncio.create_task(self.rotate_loading_phrases())
-
-                    # Wait for response or tool approval request
-                    while True:
-                        await self.response_complete.wait()
-
-                        # Check if tool approval is needed
-                        if self.pending_approval:
-                            # Prompt for approval
-                            response = await self._input.confirm("Approve tools? (y/n):")
-                            if response.lower() == "y":
-                                await self.ws_client.approve_tools()
-                                approved = Text()
-                                approved.append("  ✦ Approved", style=f"bold {GREEN}")
-                                self.console.print(approved)
-                            else:
-                                await self.ws_client.deny_tools()
-                                denied = Text()
-                                denied.append("  ✦ Denied", style=f"bold {ERROR_RED}")
-                                self.console.print(denied)
-                            self.pending_approval = False
-
-                            # Restart particle spinner for tool execution
-                            self.spinner = ParticleSpinner(
-                                self.console, self.loading_phrases[0]
-                            )
-                            self.spinner.start()
-                            self.rotating_phrases = True
-                            rotation_task = asyncio.create_task(self.rotate_loading_phrases())
-
-                            # Clear and wait for actual response
-                            self.response_complete.clear()
-                            continue
-                        else:
-                            # Response is complete
-                            break
-
-                    # Stop rotation and spinner
-                    self.rotating_phrases = False
-                    self._stop_spinner()
-                    try:
-                        rotation_task.cancel()
-                    except Exception:
-                        pass
+                    await self._send_and_wait(user_input)
 
             except CancelledInput:
                 # User pressed Escape - cancel current request if one is running
@@ -365,6 +329,60 @@ class ClothoREPL:
                 break
             except Exception as e:
                 self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+
+    async def _send_and_wait(self, message: str):
+        """Send a message to the agent and wait for the complete response.
+
+        Args:
+            message: Message text to send
+        """
+        self.response_complete.clear()
+        await self.ws_client.send_message(message, stream=self.streaming)
+
+        # Start particle spinner
+        self.spinner = ParticleSpinner(self.console, self.loading_phrases[0])
+        self.spinner.start()
+
+        # Start phrase rotation in background
+        self.rotating_phrases = True
+        rotation_task = asyncio.create_task(self.rotate_loading_phrases())
+
+        try:
+            # Wait for response or tool approval request
+            while True:
+                await self.response_complete.wait()
+
+                if self.pending_approval:
+                    response = await self._input.confirm("Approve tools? (y/n):")
+                    if response.lower() == "y":
+                        await self.ws_client.approve_tools()
+                        approved = Text()
+                        approved.append("  ✦ Approved", style=f"bold {GREEN}")
+                        self.console.print(approved)
+                    else:
+                        await self.ws_client.deny_tools()
+                        denied = Text()
+                        denied.append("  ✦ Denied", style=f"bold {ERROR_RED}")
+                        self.console.print(denied)
+                    self.pending_approval = False
+
+                    # Restart particle spinner for tool execution
+                    self.spinner = ParticleSpinner(self.console, self.loading_phrases[0])
+                    self.spinner.start()
+                    self.rotating_phrases = True
+                    rotation_task = asyncio.create_task(self.rotate_loading_phrases())
+
+                    self.response_complete.clear()
+                    continue
+                else:
+                    break
+        finally:
+            self.rotating_phrases = False
+            self._stop_spinner()
+            try:
+                rotation_task.cancel()
+            except Exception:
+                pass
 
     async def handle_command(self, command: str):
         """Process slash command.
@@ -466,14 +484,16 @@ class ClothoREPL:
         ))
 
 
-def run_repl(host: str = "127.0.0.1", port: int = 8000):
+def run_repl(host: str = "127.0.0.1", port: int = 8000, initial_prompt: str | None = None, chat_id: str | None = None):
     """Run interactive REPL with gateway.
 
     Args:
         host: Gateway host address
         port: Gateway port number
+        initial_prompt: Optional prompt to send automatically on startup
+        chat_id: Optional existing chat ID to resume
     """
-    repl = ClothoREPL(host, port)
+    repl = ClothoREPL(host, port, initial_prompt=initial_prompt, chat_id=chat_id)
 
     async def async_main():
         with GatewayManager(host, port):
