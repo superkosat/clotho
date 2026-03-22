@@ -61,15 +61,33 @@ def _handle_sandbox(args: list[str]) -> None:
 def _handle_run(args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="clotho")
     parser.add_argument("-d", "--daemon", action="store_true", help="Run gateway in daemon mode (no CLI)")
+    parser.add_argument("-p", "--print", dest="print_mode", action="store_true", help="Non-interactive mode: send prompt, print response, exit")
     parser.add_argument("--host", default="127.0.0.1", help="Gateway host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8000, help="Gateway port (default: 8000)")
     parser.add_argument("--chat", default=None, metavar="CHAT_ID", help="Resume an existing chat by ID")
+    parser.add_argument("--timeout", type=int, default=None, metavar="SECONDS", help="Timeout in seconds; only valid with -p (default: 300)")
     parser.add_argument("prompt", nargs="*", help="Initial prompt to send on startup")
     parsed = parser.parse_args(args)
 
+    if parsed.timeout is not None and not parsed.print_mode:
+        parser.error("--timeout is only valid with -p/--print")
+
     initial_prompt = " ".join(parsed.prompt) if parsed.prompt else None
 
-    if parsed.daemon:
+    if parsed.print_mode:
+        if not initial_prompt and not sys.stdin.isatty():
+            initial_prompt = sys.stdin.read().strip()
+        if not initial_prompt:
+            parser.error("a prompt is required in -p mode (pass as argument or pipe via stdin)")
+        from cli.repl import run_noninteractive
+        run_noninteractive(
+            host=parsed.host,
+            port=parsed.port,
+            prompt=initial_prompt,
+            chat_id=parsed.chat,
+            timeout=parsed.timeout if parsed.timeout is not None else 300,
+        )
+    elif parsed.daemon:
         from cli.daemon import run_daemon
         run_daemon(host=parsed.host, port=parsed.port)
     else:
@@ -81,20 +99,22 @@ def main():
     """Main entry point for the Clotho CLI."""
     setproctitle.setproctitle("clotho-cli")
 
-    raw = sys.argv[1:]
-    first = raw[0] if raw else None
+    try:
+        raw = sys.argv[1:]
+        first = raw[0] if raw else None
 
-    if first == "setup":
-        _handle_setup(raw[1:])
-    elif first == "sandbox":
-        _handle_sandbox(raw[1:])
-    else:
-        # "run" is the default — strip the explicit keyword if present
-        _handle_run(raw[1:] if first == "run" else raw)
+        if first == "setup":
+            _handle_setup(raw[1:])
+        elif first == "sandbox":
+            _handle_sandbox(raw[1:])
+        else:
+            # "run" is the default — strip the explicit keyword if present
+            _handle_run(raw[1:] if first == "run" else raw)
+    except SystemExit:
+        raise  # let argparse error exits and sys.exit() pass through unchanged
+    except Exception as exc:
+        sys.exit(handle_exception(exc))
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        sys.exit(handle_exception(exc))
+    main()

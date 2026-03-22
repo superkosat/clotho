@@ -484,6 +484,108 @@ class ClothoREPL:
         ))
 
 
+def run_noninteractive(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    prompt: str = "",
+    chat_id: str | None = None,
+    timeout: int = 300,
+):
+    """Run in non-interactive mode: send prompt, collect response, print to stdout, exit.
+
+    Output is the raw agent text with no Rich formatting, suitable for piping.
+    Tool requests are auto-approved (DENY overrides are still respected by the
+    gateway before the request reaches the client). Errors go to stderr.
+
+    Args:
+        host: Gateway host address
+        port: Gateway port number
+        prompt: Prompt to send to the agent
+        chat_id: Optional existing chat ID to resume
+        timeout: Seconds to wait before raising a timeout error
+    """
+    from exceptions import SystemException
+    from gateway.auth.token import load_token
+
+    token = load_token()
+    if not token:
+        raise SystemException(message="No auth token found. Run: clotho setup", exit_code=1)
+
+    async def async_main():
+        api = ClothoAPIClient(host, port, token)
+
+        if chat_id:
+            chats = api.list_chats()
+            ids = [c["chat_id"] for c in chats]
+            if chat_id not in ids:
+                raise SystemException(message=f"Chat not found: {chat_id}", exit_code=2)
+            resolved = chat_id
+        else:
+            resolved = api.create_chat()
+
+        ws = ClothoWebSocketClient(host, port, resolved, token)
+        await ws.connect()
+
+        done = asyncio.Event()
+        error_holder: list[str] = []
+        buffer: list[str] = []
+
+        def on_message(msg: dict):
+            msg_type = msg.get("type")
+            data = msg.get("data", {})
+
+            if msg_type in ("agent.text", "agent.text_delta"):
+                buffer.append(data.get("text", ""))
+            elif msg_type == "agent.tool_request":
+                asyncio.create_task(ws.approve_tools())
+            elif msg_type == "agent.error":
+                error_holder.append(data.get("message", "Unknown error"))
+                done.set()
+            elif msg_type == "agent.turn_complete":
+                done.set()
+            elif msg_type == "connection.error":
+                error_holder.append(data.get("message", "Connection lost"))
+                done.set()
+
+        ws.on_message(on_message)
+        listen_task = asyncio.create_task(ws.listen())
+        try:
+            await ws.send_message(prompt, stream=True)
+            try:
+                await asyncio.wait_for(done.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise SystemException(
+                    message=f"Agent run timed out after {timeout} seconds",
+                    exit_code=1,
+                )
+        finally:
+            listen_task.cancel()
+            try:
+                await listen_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await ws.disconnect()
+
+        if error_holder:
+            raise SystemException(message=error_holder[0], exit_code=1)
+
+        result = "".join(buffer)
+        sys.stdout.write(result)
+        if result and not result.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    try:
+        with GatewayManager(host, port):
+            asyncio.run(async_main())
+    except SystemException:
+        raise
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as exc:
+        raise SystemException(message=str(exc), exit_code=1) from exc
+
+
 def run_repl(host: str = "127.0.0.1", port: int = 8000, initial_prompt: str | None = None, chat_id: str | None = None):
     """Run interactive REPL with gateway.
 
