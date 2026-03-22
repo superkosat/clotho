@@ -36,6 +36,22 @@ def get_chat(chat_id: UUID, request: Request):
     return {"chat_id": str(chat_id), "turns": turns}
 
 
+@router.post("/{chat_id}/compact")
+async def compact_chat(chat_id: UUID, request: Request):
+    """Manually trigger context compaction for a chat session."""
+    manager = request.app.state.session_manager
+    try:
+        session = manager.get_or_load_session(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    try:
+        metadata = await session.controller.compact_context()
+        return metadata
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.delete("/{chat_id}")
 def delete_chat(chat_id: UUID, request: Request):
     manager = request.app.state.session_manager

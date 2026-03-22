@@ -1,13 +1,22 @@
 import json
 from collections.abc import Iterator
 
-from agent.LLM import LLM
+from agent.LLM import LLM, _split_at_nth_user_turn, _format_context_for_summary
 from agent.models.stream_delta import StreamDelta
 from agent.models.tool import Tool
-from agent.models.turn import AssistantTurn, Turn
+from agent.models.turn import AssistantTurn, SystemTurn, Turn, UserTurn
 from agent.models.content_block import ImageContent, TextContent, ToolUseContent, ToolResultContent
 from agent.models.usage import Usage
 import openai
+
+_COMPACTION_SYSTEM = (
+    "You are a conversation summarizer. Produce a dense, factual summary of the "
+    "conversation below. Preserve all important context: decisions made, code written "
+    "or modified, file paths touched, problems solved, information discovered, and any "
+    "ongoing tasks or open questions. Do not include meta-commentary about the "
+    "conversation format. Write as a flowing narrative."
+)
+
 
 class OpenAIModel(LLM):
     def __init__(
@@ -24,21 +33,21 @@ class OpenAIModel(LLM):
             api_key=api_key
         )
 
-    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> Iterator[StreamDelta]:
+    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int | None) -> Iterator[StreamDelta]:
         openai_messages = self._to_openai_messages(messages)
 
         kwargs = dict(
             model=self.model,
             messages=openai_messages,
-            max_tokens=max_tokens,
             stream=True,
             stream_options={"include_usage": True},
         )
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
 
         collected_text = ""
-        # tool_calls_acc: {index: {id, name, arguments_json}}
         tool_calls_acc: dict[int, dict] = {}
         model_name = self.model
         stop_reason = "end_turn"
@@ -51,7 +60,6 @@ class OpenAIModel(LLM):
             if chunk.model:
                 model_name = chunk.model
 
-            # Usage comes on the final chunk (with stream_options)
             if chunk.usage:
                 input_tokens = chunk.usage.prompt_tokens
                 output_tokens = chunk.usage.completion_tokens
@@ -61,7 +69,6 @@ class OpenAIModel(LLM):
 
             choice = chunk.choices[0]
 
-            # Finish reason
             if choice.finish_reason:
                 if choice.finish_reason == "tool_calls":
                     stop_reason = "tool_use"
@@ -74,17 +81,14 @@ class OpenAIModel(LLM):
             if not delta:
                 continue
 
-            # Text content
             if delta.content:
                 collected_text += delta.content
                 yield StreamDelta(type="text_delta", text=delta.content)
 
-            # Tool calls
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     idx = tc_delta.index
                     if idx not in tool_calls_acc:
-                        # New tool call starting
                         tool_calls_acc[idx] = {
                             "id": tc_delta.id or "",
                             "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
@@ -96,7 +100,6 @@ class OpenAIModel(LLM):
                                 tool_call_id=tc_delta.id,
                                 tool_call_name=tc_delta.function.name,
                             )
-                    # Accumulate arguments
                     if tc_delta.function and tc_delta.function.arguments:
                         tool_calls_acc[idx]["arguments_json"] += tc_delta.function.arguments
                         yield StreamDelta(
@@ -105,7 +108,6 @@ class OpenAIModel(LLM):
                             tool_call_id=tool_calls_acc[idx]["id"],
                         )
 
-        # Build the final AssistantTurn
         content_blocks = []
         if collected_text:
             content_blocks.append(TextContent(text=collected_text))
@@ -131,20 +133,79 @@ class OpenAIModel(LLM):
         )
         yield StreamDelta(type="message_complete", assistant_turn=assistant_turn)
 
-    def invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> AssistantTurn:
+    def invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int | None) -> AssistantTurn:
         openai_messages = self._to_openai_messages(messages)
 
-        if tools:
-            tools = self._convert_tools(tools)
-
-        response = self.client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=openai_messages,
-            tools=tools,
-            max_tokens=max_tokens,
         )
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools)
 
+        response = self.client.chat.completions.create(**kwargs)
         return self._to_assistant_turn(response)
+
+    def count_tokens(self, messages: list[Turn], tools: list[Tool] | None) -> int:
+        """Estimate token count using tiktoken."""
+        try:
+            import tiktoken
+            try:
+                enc = tiktoken.encoding_for_model(self.model)
+            except KeyError:
+                enc = tiktoken.get_encoding("cl100k_base")
+
+            total = 0
+            openai_messages = self._to_openai_messages(messages)
+            for msg in openai_messages:
+                total += 4  # per-message overhead
+                content = msg.get("content")
+                if isinstance(content, str):
+                    total += len(enc.encode(content))
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and "text" in part:
+                            total += len(enc.encode(part["text"]))
+                if msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        total += len(enc.encode(json.dumps(tc)))
+            total += 2  # reply priming
+            if tools:
+                for tool in self._convert_tools(tools):
+                    total += len(enc.encode(json.dumps(tool)))
+            return total
+        except ImportError:
+            # tiktoken not available — use heuristic
+            return sum(len(t.model_dump_json()) for t in messages) // 4
+
+    def compact(
+        self,
+        context: list[Turn],
+        fresh_system_turn: SystemTurn,
+        preserve_last_n: int,
+        max_summary_tokens: int,
+    ) -> list[Turn]:
+        to_preserve, to_summarize = _split_at_nth_user_turn(context, preserve_last_n)
+        if not to_summarize:
+            return context
+
+        formatted = _format_context_for_summary(to_summarize)
+        messages = self._to_openai_messages([
+            SystemTurn(content=_COMPACTION_SYSTEM),
+            UserTurn(content=f"Please summarize this conversation:\n\n{formatted}"),
+        ])
+
+        kwargs: dict = dict(
+            model=self.model,
+            messages=messages,
+            max_tokens=max_summary_tokens,
+        )
+        response = self.client.chat.completions.create(**kwargs)
+        summary = response.choices[0].message.content or "(no summary produced)"
+        summary_turn = UserTurn(content=f"[CONVERSATION SUMMARY]\n{summary}")
+        return [fresh_system_turn, summary_turn] + to_preserve
 
     def _to_openai_messages(self, turns: list[Turn]) -> list[dict]:
         messages = []
@@ -241,7 +302,6 @@ class OpenAIModel(LLM):
             )
         )
 
-
     def _convert_tools(self, tools: list[Tool]) -> list[dict]:
         return [
             {
@@ -254,6 +314,3 @@ class OpenAIModel(LLM):
             }
             for tool in tools
         ]
-
-    def compact(self):
-        pass

@@ -202,6 +202,31 @@ class ClothoREPL:
                     content = content[:500] + "... (truncated)"
                 self.console.print(f"[{DIM}]Result: {content}[/{DIM}]")
 
+        elif msg_type == "agent.compaction_started":
+            tokens_before = data.get("tokens_before", 0)
+            context_window = data.get("context_window", 0)
+            pct = int(tokens_before / context_window * 100) if context_window else 0
+            self._stop_spinner()
+            self._stop_live()
+            self.spinner = ParticleSpinner(self.console, f"Compacting context ({pct}% full)")
+            self.spinner.start()
+
+        elif msg_type == "agent.context_compacted":
+            self._stop_spinner()
+            tokens_before = data.get("tokens_before", 0)
+            tokens_after = data.get("tokens_after")
+            turns_removed = data.get("turns_removed", 0)
+            compact_msg = Text()
+            compact_msg.append("  ⊹ Context compacted", style=f"bold {PURPLE_BOLD}")
+            if tokens_after is not None:
+                compact_msg.append(
+                    f"  {tokens_before:,} → {tokens_after:,} tokens, {turns_removed} turns summarized",
+                    style=DIM
+                )
+            else:
+                compact_msg.append(f"  {turns_removed} turns summarized", style=DIM)
+            self.console.print(compact_msg)
+
         elif msg_type == "agent.error":
             self._stop_spinner()
             self._stop_live()
@@ -424,6 +449,8 @@ class ClothoREPL:
             self.handle_stream(args)
         elif cmd == "sandbox":
             self.command_handler.handle_sandbox(args)
+        elif cmd == "compact":
+            await self.command_handler.handle_compact(self.chat_id)
         else:
             self.console.print(f"[{ERROR_RED}]Unknown command: /{cmd}[/{ERROR_RED}]")
             self.console.print(f"Type [{GREEN}]/help[/{GREEN}] for available commands")
@@ -468,6 +495,7 @@ class ClothoREPL:
             ("/sandbox", "Show sandbox status"),
             ("/sandbox on|off", "Enable or disable the sandbox"),
             ("/sandbox build", "Build the sandbox Docker image"),
+            ("/compact", "Summarize old conversation turns to free context space"),
         ]
 
         max_cmd_len = max(len(cmd) for cmd, _ in commands)

@@ -3,6 +3,7 @@
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from cli.api_client import ClothoAPIClient
 from cli.theme import GREEN, PURPLE, DIM, ERROR_RED, WARN_AMBER
@@ -90,6 +91,7 @@ class CommandHandler:
     async def add_profile(self):
         """Interactive profile creation."""
         import asyncio
+        from agent.models.model_registry import lookup_model
         try:
             name = await asyncio.to_thread(self.console.input, "Profile name: ")
             provider = await asyncio.to_thread(self.console.input, "Provider (openai/ollama/anthropic): ")
@@ -97,17 +99,70 @@ class CommandHandler:
             base_url = await asyncio.to_thread(self.console.input, "Base URL (optional): ")
             api_key = await asyncio.to_thread(self.console.input, "API Key (optional): ")
 
-            profile = {
-                "provider": provider,
-                "model": model,
-            }
+            profile: dict = {"provider": provider, "model": model}
             if base_url:
                 profile["base_url"] = base_url
             if api_key:
                 profile["api_key"] = api_key
 
+            # Resolve context limits from registry
+            registry_entry = lookup_model(model)
+            if registry_entry:
+                profile["context_window"] = registry_entry["context_window"]
+                profile["max_output_tokens"] = registry_entry["max_output_tokens"]
+            else:
+                self.console.print(
+                    f"[{WARN_AMBER}]Model '{model}' is not in the known model registry.[/{WARN_AMBER}]"
+                )
+                self.console.print(
+                    f"[{WARN_AMBER}]You must specify the context window. "
+                    f"An inaccurate value may break the agent unexpectedly.[/{WARN_AMBER}]"
+                )
+                while True:
+                    raw = await asyncio.to_thread(
+                        self.console.input, "Context window (tokens, required): "
+                    )
+                    try:
+                        profile["context_window"] = int(raw.strip().replace(",", ""))
+                        break
+                    except ValueError:
+                        self.console.print(f"[{ERROR_RED}]Enter a whole number (e.g. 8192)[/{ERROR_RED}]")
+
+                while True:
+                    raw = await asyncio.to_thread(
+                        self.console.input, "Max output tokens (tokens, required): "
+                    )
+                    try:
+                        profile["max_output_tokens"] = int(raw.strip().replace(",", ""))
+                        break
+                    except ValueError:
+                        self.console.print(f"[{ERROR_RED}]Enter a whole number (e.g. 4096)[/{ERROR_RED}]")
+
             self.api.create_profile(name, profile)
             self.console.print(f"[{GREEN}]✦ Created profile: {name}[/{GREEN}]")
+        except Exception as e:
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+
+    async def handle_compact(self, chat_id: str) -> None:
+        """Trigger manual context compaction."""
+        if not chat_id:
+            self.console.print(f"[{ERROR_RED}]No active chat session[/{ERROR_RED}]")
+            return
+        try:
+            metadata = self.api.compact_chat(chat_id)
+            tokens_before = metadata.get("tokens_before", 0)
+            tokens_after = metadata.get("tokens_after")
+            turns_removed = metadata.get("turns_removed", 0)
+            msg = Text()
+            msg.append("  ✦ Compaction complete", style=f"bold {GREEN}")
+            if tokens_after is not None:
+                msg.append(
+                    f"  {tokens_before:,} → {tokens_after:,} tokens, {turns_removed} turns summarized",
+                    style=DIM
+                )
+            else:
+                msg.append(f"  {turns_removed} turns summarized", style=DIM)
+            self.console.print(msg)
         except Exception as e:
             self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
 

@@ -50,8 +50,8 @@ def _handle_response(response: requests.Response) -> None:
         exc.args = (message,)  # Required for Exception.__str__
         raise exc
 
-    # Fall back to raising HTTP error for non-Clotho errors
-    response.raise_for_status()
+    # Raise with the human-readable message extracted from the response body
+    raise exceptions.ServiceException(message=message)
 
 
 class ClothoAPIClient:
@@ -263,6 +263,15 @@ class ClothoAPIClient:
         _handle_response(response)
 
     # Control endpoints
+
+    def compact_chat(self, chat_id: str) -> dict:
+        """Trigger manual context compaction for a chat."""
+        response = requests.post(
+            f"{self.base_url}/api/chats/{chat_id}/compact",
+            headers=self.headers,
+        )
+        _handle_response(response)
+        return response.json()
 
     def panic_chat(self, chat_id: str) -> None:
         """Cancel the active run and drain queued work for a session."""

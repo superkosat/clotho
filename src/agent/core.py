@@ -5,12 +5,13 @@ import inspect
 import os
 import queue
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from typing import Callable, Awaitable
 
 from agent.models.tool import Tool
 from agent.models.content_block import TextContent, ToolUseContent, ToolResultContent
 from agent.models.stream_delta import StreamDelta
-from agent.models.turn import AssistantTurn, SystemTurn, UserTurn, ToolTurn
+from agent.models.turn import AssistantTurn, CompactionTurn, SystemTurn, UserTurn, ToolTurn
 from agent.providers.anthropic import AnthropicModel
 from agent.providers.openai import OpenAIModel
 from agent.utils.projects import *
@@ -27,13 +28,21 @@ from sandbox.exceptions import SandboxImageNotFoundError
 
 load_dotenv()
 
+_COMPACTION_THRESHOLD = 0.75  # compact when context reaches 75% of window
+_COMPACTION_PRESERVE_N = 4    # preserve last N user exchanges
+_COMPACTION_TARGET_PCT = 0.30 # aim for summary to be ~30% of context window
+
+
 class ClothoController():
     def __init__(self):
-        self.model = None #LLM
-        self.current_project_id = None #conversation id
-        self.context = None #conversation context
-        self.tools = None #available tools
-        self.sandbox = None #session-scoped sandbox
+        self.model = None           # LLM
+        self.current_project_id = None
+        self.context = None         # list[Turn]
+        self.tools = None
+        self.sandbox = None
+        self.context_window: int | None = None
+        self.max_output_tokens: int | None = None
+        self._last_input_tokens: int = 0
 
     async def run(
         self,
@@ -43,32 +52,25 @@ class ClothoController():
         stream: bool = False,
         cancel_event: asyncio.Event | None = None,
     ):
-        """
-        Full agent loop. Invokes model, handles tool use cycles, and
-        communicates with the client via emit/request_approval callbacks.
-
-        emit(event_type, data) — deliver events to client
-        request_approval(tool_calls) — evaluate per-tool permissions, returns
-            dict mapping tool call IDs to "allow" or "deny"
-        stream — when True, emit incremental text_delta events as tokens arrive
-        cancel_event — when set, the loop exits at the next checkpoint and
-            raises CancelledError. The underlying LLM/tool thread completes
-            naturally (Python threads cannot be interrupted), but its result
-            is discarded and no further work is dispatched.
-        """
-
         def _check_cancelled():
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Run cancelled")
 
-        turn = UserTurn(content=user_input)
+        _check_cancelled()
 
+        # Pre-invoke compaction check (before the new user turn is added)
+        await self._check_and_compact(emit, cancel_event)
+
+        turn = UserTurn(content=user_input)
         _check_cancelled()
         if stream:
             response = await self._stream_and_emit(turn, emit, cancel_event)
         else:
             response = await asyncio.to_thread(self.invoke, turn)
             await self._emit_content(response, emit)
+
+        if response and response.usage:
+            self._last_input_tokens = response.usage.input_tokens
 
         # Tool use loop
         consecutive_denials = 0
@@ -84,11 +86,8 @@ class ClothoController():
             ]
             verdicts = await request_approval(tool_call_dicts)
 
-            # Approval wait is a natural cancellation point (cancel resolves
-            # the pending_approval future as denied, which returns here).
             _check_cancelled()
 
-            # Process each tool individually based on its verdict
             all_denied = all(verdicts.get(t.id) != "allow" for t in tool_uses)
             tool_results = []
             for tool_use in tool_uses:
@@ -105,7 +104,7 @@ class ClothoController():
                         content=f"Tool '{tool_use.name}' is not permitted by the current permission policy.",
                         is_error=True,
                     )
-                else:  # user_deny
+                else:
                     result = ToolResultContent(
                         tool_use_id=tool_use.id,
                         tool_name=tool_use.name,
@@ -121,7 +120,6 @@ class ClothoController():
                     "is_error": result.is_error,
                 })
 
-            # Track consecutive all-denied rounds to prevent infinite loops
             if all_denied:
                 consecutive_denials += 1
                 if consecutive_denials >= max_consecutive_denials:
@@ -131,7 +129,9 @@ class ClothoController():
 
             _check_cancelled()
 
-            # Re-invoke with tool results (including denials, so the model can adapt)
+            # Compaction check before re-invoking with tool results
+            await self._check_and_compact(emit, cancel_event)
+
             tool_turn = ToolTurn(content=tool_results)
             if stream:
                 response = await self._stream_and_emit(tool_turn, emit, cancel_event)
@@ -139,15 +139,141 @@ class ClothoController():
                 response = await asyncio.to_thread(self.invoke, tool_turn)
                 await self._emit_content(response, emit)
 
-        # Signal turn complete
+            if response and response.usage:
+                self._last_input_tokens = response.usage.input_tokens
+
         await emit("agent.turn_complete", {
             "stop_reason": response.stop_reason,
             "model": response.model,
             "usage": response.usage.model_dump(),
         })
 
+    def _estimate_tokens_heuristic(self) -> int:
+        """Rough token estimate: total JSON bytes of context / 4."""
+        if not self.context:
+            return 0
+        return sum(len(t.model_dump_json()) for t in self.context) // 4
+
+    async def _check_and_compact(
+        self,
+        emit: Callable[[str, dict], Awaitable[None]] | None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> None:
+        """Check if context is over the threshold and compact if so."""
+        if not self.context_window or not self.context or not self.model:
+            return
+
+        # Need more than preserve_last_n user turns to have anything to compact
+        user_turn_count = sum(1 for t in self.context if isinstance(t, UserTurn))
+        if user_turn_count <= _COMPACTION_PRESERVE_N:
+            return
+
+        # Count tokens
+        try:
+            current_tokens = await asyncio.to_thread(
+                self.model.count_tokens, self.context, self.tools
+            )
+            self._last_input_tokens = current_tokens
+        except Exception:
+            current_tokens = self._last_input_tokens or self._estimate_tokens_heuristic()
+
+        if current_tokens / self.context_window < _COMPACTION_THRESHOLD:
+            return
+
+        if emit:
+            await emit("agent.compaction_started", {
+                "tokens_before": current_tokens,
+                "context_window": self.context_window,
+            })
+
+        await self._run_compaction_inner(current_tokens, emit)
+
+    async def compact_context(
+        self,
+        emit: Callable[[str, dict], Awaitable[None]] | None = None,
+    ) -> dict:
+        """Manually compact the context. Returns compaction metadata.
+
+        Raises ValueError if session is not ready or context is too small.
+        """
+        if not self.context or not self.model:
+            raise ValueError("No active session to compact")
+
+        user_turn_count = sum(1 for t in self.context if isinstance(t, UserTurn))
+        if user_turn_count <= _COMPACTION_PRESERVE_N:
+            raise ValueError(
+                f"Not enough conversation history to compact — need more than "
+                f"{_COMPACTION_PRESERVE_N} exchanges."
+            )
+
+        try:
+            current_tokens = await asyncio.to_thread(
+                self.model.count_tokens, self.context, self.tools
+            )
+            self._last_input_tokens = current_tokens
+        except Exception:
+            current_tokens = self._last_input_tokens or self._estimate_tokens_heuristic()
+
+        return await self._run_compaction_inner(current_tokens, emit)
+
+    async def _run_compaction_inner(
+        self,
+        tokens_before: int,
+        emit: Callable[[str, dict], Awaitable[None]] | None,
+    ) -> dict:
+        """Execute compaction and persist. Returns metadata dict."""
+        env_info = build_environment_info(working_directory=os.getcwd())
+        skills = load_skills()
+        skills_section = build_skills_prompt_section(skills) if skills else None
+        prompt = build_system_prompt(environment_info=env_info, skills_section=skills_section)
+        fresh_system_turn = SystemTurn(content=prompt)
+
+        max_summary_tokens = min(
+            int((self.context_window or 8192) * _COMPACTION_TARGET_PCT),
+            self.max_output_tokens or 8192,
+        )
+        max_summary_tokens = max(max_summary_tokens, 512)  # floor
+
+        new_context = await asyncio.to_thread(
+            self.model.compact,
+            self.context,
+            fresh_system_turn,
+            _COMPACTION_PRESERVE_N,
+            max_summary_tokens,
+        )
+
+        turns_removed = len(self.context) - len(new_context)
+
+        try:
+            tokens_after = await asyncio.to_thread(
+                self.model.count_tokens, new_context, self.tools
+            )
+        except Exception:
+            tokens_after = None
+
+        self.context = new_context
+        self._last_input_tokens = tokens_after or 0
+
+        compaction_turn = CompactionTurn(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            turns_removed=turns_removed,
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+        )
+        append_compaction_record(self.current_project_id, compaction_turn, new_context)
+
+        metadata = {
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "turns_removed": turns_removed,
+        }
+
+        if emit:
+            await emit("agent.context_compacted", metadata)
+
+        return metadata
+
     def _execute_tool(self, call: ToolUseContent) -> ToolResultContent:
-        """Execute a single tool call. Returns the result."""
         tool = next((t for t in self.tools if t.name == call.name), None)
         if not tool:
             return ToolResultContent(
@@ -174,7 +300,6 @@ class ClothoController():
         response: AssistantTurn,
         emit: Callable[[str, dict], Awaitable[None]],
     ):
-        """Extract text from a response and emit as agent.text events."""
         if isinstance(response.content, str):
             if response.content:
                 await emit("agent.text", {"text": response.content})
@@ -183,7 +308,15 @@ class ClothoController():
                 if isinstance(block, TextContent):
                     await emit("agent.text", {"text": block.text})
 
-    def set_model(self, provider: str, model: str, base_url: str = None, api_key: str = None):
+    def set_model(
+        self,
+        provider: str,
+        model: str,
+        base_url: str = None,
+        api_key: str = None,
+        context_window: int | None = None,
+        max_output_tokens: int | None = None,
+    ):
         match provider:
             case "ollama":
                 from agent.providers.ollama import OllamaModel
@@ -195,11 +328,10 @@ class ClothoController():
             case _:
                 raise ProviderNotSupportedError(provider)
 
+        self.context_window = context_window
+        self.max_output_tokens = max_output_tokens
+
     def new_chat(self) -> bool:
-        """
-        Creates a new project file, resets context with system prompt, and
-        creates new project file
-        """
         self.current_project_id = uuid4()
 
         env_info = build_environment_info(working_directory=os.getcwd())
@@ -210,32 +342,24 @@ class ClothoController():
 
         if (create_project_file(self.current_project_id, system_turn=system_turn)):
             self.context = [system_turn]
-            self._init_sandbox()  # Initialize sandbox if enabled
+            self._init_sandbox()
             return True
         else:
             return False
 
     def load_chat(self, id: UUID) -> bool:
-        """
-        Retrieves chat history from project file, sets current project id and
-        context
-        """
         history_from_file = read_content_from_project_file(id)
 
         if history_from_file is not None:
             self.context = history_from_file
             self.current_project_id = id
-            self._init_sandbox()  # Initialize sandbox if enabled
+            self._init_sandbox()
             return True
         else:
             return False
 
     def delete_chat(self) -> bool:
-        """
-        Deletes the current chat's file, sets current project id and context
-        to None. Then calls new_chat().
-        """
-        self._cleanup_sandbox()  # Cleanup sandbox before deleting
+        self._cleanup_sandbox()
         if (delete_project_file(self.current_project_id)):
             self.current_project_id = None
             self.context = None
@@ -243,7 +367,7 @@ class ClothoController():
             return True
         else:
             return False
-        
+
     def checkpoint_turn(self, input_turn: UserTurn | ToolTurn, assistant_turn: AssistantTurn) -> bool:
         if (append_to_project_file(
             self.current_project_id,
@@ -255,28 +379,18 @@ class ClothoController():
             return False
 
     def invoke(self, turn: UserTurn | ToolTurn) -> AssistantTurn:
-        """
-        Appends a turn to the context, invokes the model with the context,
-        and updates the context and project file with both the input turn and
-        AssistantTurn, and the context with just the AssistantTurn
-        """
         if self.model is None:
             raise NoModelConfiguredError()
         if self.context is None:
             raise NoActiveChatError()
 
         self.context.append(turn)
-        response = self.model.invoke(self.context, tools=self.tools, max_tokens=4000)
+        response = self.model.invoke(self.context, tools=self.tools, max_tokens=self.max_output_tokens)
         self.context.append(response)
         self.checkpoint_turn(input_turn=turn, assistant_turn=response)
         return response
 
     def stream_invoke(self, turn: UserTurn | ToolTurn) -> Iterator[StreamDelta]:
-        """
-        Appends a turn to the context, streams the model response as
-        StreamDelta objects. The final delta (message_complete) contains the
-        full AssistantTurn which is appended to context and checkpointed.
-        """
         if self.model is None:
             raise NoModelConfiguredError()
         if self.context is None:
@@ -284,7 +398,7 @@ class ClothoController():
 
         self.context.append(turn)
         assistant_turn = None
-        for delta in self.model.stream_invoke(self.context, tools=self.tools, max_tokens=4000):
+        for delta in self.model.stream_invoke(self.context, tools=self.tools, max_tokens=self.max_output_tokens):
             if delta.type == "message_complete":
                 assistant_turn = delta.assistant_turn
             yield delta
@@ -299,24 +413,14 @@ class ClothoController():
         emit: Callable[[str, dict], Awaitable[None]],
         cancel_event: asyncio.Event | None = None,
     ) -> AssistantTurn:
-        """
-        Run stream_invoke in a thread, forwarding deltas to the client via
-        emit as they arrive. Returns the final AssistantTurn.
-
-        When cancel_event is set the consumer loop raises CancelledError at
-        the next 100ms poll boundary. The producer thread stops pulling deltas
-        from the LLM stream on its next iteration check, but may not exit
-        immediately if the provider is blocked mid-chunk. The thread always
-        finishes naturally — results after cancellation are discarded.
-        """
         q: queue.Queue[StreamDelta | None] = queue.Queue()
 
         def _produce():
             for delta in self.stream_invoke(turn):
                 if cancel_event and cancel_event.is_set():
-                    break  # stop pulling from the LLM stream
+                    break
                 q.put(delta)
-            q.put(None)  # sentinel — always sent so consumer never hangs
+            q.put(None)
 
         thread = asyncio.get_event_loop().run_in_executor(None, _produce)
 
@@ -325,11 +429,9 @@ class ClothoController():
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Stream cancelled")
             try:
-                # Use a short timeout so cancel_event is polled regularly
-                # even when the producer is blocked mid-inference or mid-tool.
                 delta = await asyncio.to_thread(q.get, timeout=0.1)
             except queue.Empty:
-                continue  # timeout — loop back to check cancel_event
+                continue
             if delta is None:
                 break
             if delta.type == "text_delta":
@@ -347,9 +449,9 @@ class ClothoController():
             elif delta.type == "message_complete":
                 assistant_turn = delta.assistant_turn
 
-        await thread  # ensure producer thread has exited
+        await thread
         return assistant_turn
-    
+
     def register_tools(self, tools: list[Tool]):
         self.tools = tools
 
@@ -357,7 +459,6 @@ class ClothoController():
         self.tools = None
 
     def _init_sandbox(self):
-        """Initialize sandbox for this session if enabled."""
         if not is_sandbox_enabled():
             return
         try:
@@ -388,33 +489,25 @@ class ClothoController():
             set_sandbox_instance(None)
 
     def _cleanup_sandbox(self):
-        """Cleanup sandbox resources."""
         if self.sandbox:
             try:
                 self.sandbox.cleanup()
             except Exception as e:
-                # Only print if not in shutdown (avoid "sys.meta_path is None" errors)
                 try:
                     import sys
                     if sys is not None and sys.meta_path is not None:
                         print(f"Warning: Error cleaning up sandbox: {e}")
                 except:
-                    pass  # Suppress all errors during shutdown
+                    pass
             finally:
                 self.sandbox = None
-                set_sandbox_instance(None)  # Clear global
+                set_sandbox_instance(None)
 
     def __del__(self):
-        """Ensure sandbox is cleaned up on destruction."""
-        # During interpreter shutdown, many modules are already torn down
-        # (sys.meta_path becomes None). Suppress all cleanup errors in this case.
         try:
             import sys
             if sys is None or sys.meta_path is None:
-                # Python is shutting down, skip cleanup (OS will reclaim resources)
                 return
         except (ImportError, AttributeError):
-            # Cannot determine shutdown state, skip cleanup to be safe
             return
-
         self._cleanup_sandbox()
