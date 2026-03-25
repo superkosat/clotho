@@ -2,12 +2,21 @@ from collections.abc import Iterator
 
 import anthropic
 
-from agent.LLM import LLM
+from agent.LLM import LLM, _split_at_nth_user_turn, _format_context_for_summary
 from agent.models.stream_delta import StreamDelta
 from agent.models.tool import Tool
-from agent.models.turn import AssistantTurn, SystemTurn, Turn
+from agent.models.turn import AssistantTurn, SystemTurn, Turn, UserTurn
 from agent.models.content_block import ImageContent, TextContent, ToolUseContent, ToolResultContent
 from agent.models.usage import Usage
+
+
+_COMPACTION_SYSTEM = (
+    "You are a conversation summarizer. Produce a dense, factual summary of the "
+    "conversation below. Preserve all important context: decisions made, code written "
+    "or modified, file paths touched, problems solved, information discovered, and any "
+    "ongoing tasks or open questions. Do not include meta-commentary about the "
+    "conversation format. Write as a flowing narrative."
+)
 
 
 class AnthropicModel(LLM):
@@ -23,12 +32,13 @@ class AnthropicModel(LLM):
             base_url=base_url,
         )
 
-    def invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> AssistantTurn:
+    def invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int | None) -> AssistantTurn:
         system, anthropic_messages = self._to_anthropic_messages(messages)
+        effective_max_tokens = max_tokens or 8192
 
         kwargs = dict(
             model=self.model,
-            max_tokens=max_tokens,
+            max_tokens=effective_max_tokens,
             messages=anthropic_messages,
         )
         if system:
@@ -39,12 +49,13 @@ class AnthropicModel(LLM):
         response = self.client.messages.create(**kwargs)
         return self._to_assistant_turn(response)
 
-    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int) -> Iterator[StreamDelta]:
+    def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int | None) -> Iterator[StreamDelta]:
         system, anthropic_messages = self._to_anthropic_messages(messages)
+        effective_max_tokens = max_tokens or 8192
 
         kwargs = dict(
             model=self.model,
-            max_tokens=max_tokens,
+            max_tokens=effective_max_tokens,
             messages=anthropic_messages,
         )
         if system:
@@ -128,7 +139,6 @@ class AnthropicModel(LLM):
                     if hasattr(event, "usage") and event.usage:
                         output_tokens = event.usage.output_tokens
 
-        # Build the final AssistantTurn
         if len(content_blocks) == 1 and isinstance(content_blocks[0], TextContent):
             content = content_blocks[0].text
         else:
@@ -142,12 +152,50 @@ class AnthropicModel(LLM):
         )
         yield StreamDelta(type="message_complete", assistant_turn=assistant_turn)
 
-    def _to_anthropic_messages(self, turns: list[Turn]) -> tuple[str | None, list[dict]]:
-        """Convert universal turns to Anthropic message format.
+    def count_tokens(self, messages: list[Turn], tools: list[Tool] | None) -> int:
+        """Count tokens using the Anthropic token-counting API.
 
-        Returns (system_prompt, messages) where system_prompt is extracted from
-        any SystemTurn (Anthropic requires it as a top-level parameter, not a message).
+        Raises anthropic.RateLimitError if the 100/min limit is hit — the caller
+        should fall back to the heuristic for that call but retry next time.
         """
+        system, anthropic_messages = self._to_anthropic_messages(messages)
+        kwargs: dict = dict(model=self.model, messages=anthropic_messages)
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools)
+        result = self.client.messages.count_tokens(**kwargs)
+        return result.input_tokens
+
+    def compact(
+        self,
+        context: list[Turn],
+        fresh_system_turn: SystemTurn,
+        preserve_last_n: int,
+        max_summary_tokens: int,
+    ) -> list[Turn]:
+        to_preserve, to_summarize = _split_at_nth_user_turn(context, preserve_last_n)
+        if not to_summarize:
+            return context
+
+        formatted = _format_context_for_summary(to_summarize)
+        user_msg = f"Please summarize this conversation:\n\n{formatted}"
+
+        system, messages = self._to_anthropic_messages([
+            SystemTurn(content=_COMPACTION_SYSTEM),
+            UserTurn(content=user_msg),
+        ])
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=max_summary_tokens,
+            system=system,
+            messages=messages,
+        )
+        summary = response.content[0].text if response.content else "(no summary produced)"
+        summary_turn = UserTurn(content=f"[CONVERSATION SUMMARY]\n{summary}")
+        return [fresh_system_turn, summary_turn] + to_preserve
+
+    def _to_anthropic_messages(self, turns: list[Turn]) -> tuple[str | None, list[dict]]:
         system = None
         messages = []
 
@@ -157,7 +205,6 @@ class AnthropicModel(LLM):
                 continue
 
             if turn.role == "tool":
-                # Tool results go as a user message with tool_result content blocks
                 tool_results = self._convert_tool_results(turn.content)
                 messages.append({"role": "user", "content": tool_results})
                 continue
@@ -200,11 +247,9 @@ class AnthropicModel(LLM):
                     "name": block.name,
                     "input": block.arguments,
                 })
-            # ToolResultContent in an assistant turn would be unusual; skip
         return blocks
 
     def _convert_tool_results(self, content: str | list) -> list[dict]:
-        """Convert ToolTurn content to Anthropic tool_result blocks."""
         if isinstance(content, str):
             return [{"type": "tool_result", "tool_use_id": "", "content": content}]
 
@@ -262,6 +307,3 @@ class AnthropicModel(LLM):
             }
             for tool in tools
         ]
-
-    def compact(self):
-        pass

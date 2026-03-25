@@ -29,7 +29,9 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "pyfiglet>=1.0.4",
     "discord.py>=2.0",
+    "tiktoken>=0.7.0",
 ]
+
 
 [project.optional-dependencies]
 dev = [

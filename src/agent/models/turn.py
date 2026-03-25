@@ -24,8 +24,19 @@ class ToolTurn(BaseModel):
     role: Literal["tool"] = "tool"
     content: str | list[ContentBlock]
 
+class CompactionTurn(BaseModel):
+    """Marker written to JSONL when context compaction occurs.
+
+    On load, everything before the last CompactionTurn is ignored —
+    the turns that follow it constitute the active context.
+    """
+    role: Literal["compaction"] = "compaction"
+    timestamp: str          # ISO-8601 UTC
+    turns_removed: int
+    tokens_before: int
+    tokens_after: int | None = None
+
 Turn = Annotated[
-    Union[AssistantTurn, SystemTurn, UserTurn, ToolTurn],
+    Union[AssistantTurn, SystemTurn, UserTurn, ToolTurn, CompactionTurn],
     Field(discriminator="role")
 ]
-    

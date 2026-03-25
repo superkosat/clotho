@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info
 
+# Ollama models
+Modelfile
+
 # Virtual environments
 .venv
 

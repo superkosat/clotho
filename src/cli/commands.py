@@ -1,11 +1,14 @@
 """Command handlers for REPL slash commands."""
 
+import asyncio
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from cli.api_client import ClothoAPIClient
-from cli.theme import GREEN, PURPLE, DIM, ERROR_RED, WARN_AMBER
+from cli.theme import GREEN, GREEN_BOLD, PURPLE, PURPLE_BOLD, DIM, ERROR_RED, WARN_AMBER
 
 
 class CommandHandler:
@@ -89,7 +92,7 @@ class CommandHandler:
 
     async def add_profile(self):
         """Interactive profile creation."""
-        import asyncio
+        from agent.models.model_registry import lookup_model
         try:
             name = await asyncio.to_thread(self.console.input, "Profile name: ")
             provider = await asyncio.to_thread(self.console.input, "Provider (openai/ollama/anthropic): ")
@@ -97,19 +100,150 @@ class CommandHandler:
             base_url = await asyncio.to_thread(self.console.input, "Base URL (optional): ")
             api_key = await asyncio.to_thread(self.console.input, "API Key (optional): ")
 
-            profile = {
-                "provider": provider,
-                "model": model,
-            }
+            profile: dict = {"provider": provider, "model": model}
             if base_url:
                 profile["base_url"] = base_url
             if api_key:
                 profile["api_key"] = api_key
 
+            # Resolve context limits from registry
+            registry_entry = lookup_model(model)
+            if registry_entry:
+                profile["context_window"] = registry_entry["context_window"]
+                profile["max_output_tokens"] = registry_entry["max_output_tokens"]
+            else:
+                self.console.print(
+                    f"[{WARN_AMBER}]Model '{model}' is not in the known model registry.[/{WARN_AMBER}]"
+                )
+                self.console.print(
+                    f"[{WARN_AMBER}]You must specify the context window. "
+                    f"An inaccurate value may break the agent unexpectedly.[/{WARN_AMBER}]"
+                )
+                while True:
+                    raw = await asyncio.to_thread(
+                        self.console.input, "Context window (tokens, required): "
+                    )
+                    try:
+                        profile["context_window"] = int(raw.strip().replace(",", ""))
+                        break
+                    except ValueError:
+                        self.console.print(f"[{ERROR_RED}]Enter a whole number (e.g. 8192)[/{ERROR_RED}]")
+
+                while True:
+                    raw = await asyncio.to_thread(
+                        self.console.input, "Max output tokens (tokens, required): "
+                    )
+                    try:
+                        profile["max_output_tokens"] = int(raw.strip().replace(",", ""))
+                        break
+                    except ValueError:
+                        self.console.print(f"[{ERROR_RED}]Enter a whole number (e.g. 4096)[/{ERROR_RED}]")
+
             self.api.create_profile(name, profile)
             self.console.print(f"[{GREEN}]✦ Created profile: {name}[/{GREEN}]")
         except Exception as e:
             self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+
+    async def handle_compact(self, chat_id: str) -> None:
+        """Trigger manual context compaction."""
+        if not chat_id:
+            self.console.print(f"[{ERROR_RED}]No active chat session[/{ERROR_RED}]")
+            return
+
+        from cli.animation import ParticleSpinner
+
+        spinner = ParticleSpinner(self.console, "Compacting context")
+        spinner.start()
+        try:
+            metadata = await asyncio.to_thread(self.api.compact_chat, chat_id)
+        except Exception as e:
+            spinner.stop()
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+            return
+        spinner.stop()
+
+        tokens_before = metadata.get("tokens_before", 0)
+        tokens_after = metadata.get("tokens_after")
+        turns_removed = metadata.get("turns_removed", 0)
+        msg = Text()
+        msg.append("  ✦ Compaction complete", style=f"bold {GREEN}")
+        if tokens_after is not None:
+            msg.append(
+                f"  {tokens_before:,} → {tokens_after:,} tokens, {turns_removed} turns summarized",
+                style=DIM
+            )
+        else:
+            msg.append(f"  {turns_removed} turns summarized", style=DIM)
+        self.console.print(msg)
+
+    def handle_context(self, chat_id: str) -> None:
+        """Display context window usage visualization."""
+        if not chat_id:
+            self.console.print(f"[{ERROR_RED}]No active chat session[/{ERROR_RED}]")
+            return
+        try:
+            info = self.api.get_context_info(chat_id)
+        except Exception as e:
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+            return
+
+        current = info["current_tokens"]
+        window = info["context_window"]
+        threshold = info["compaction_threshold"]
+
+        if not window:
+            self.console.print(f"[{WARN_AMBER}]No context window configured for this model[/{WARN_AMBER}]")
+            return
+
+        pct = current / window
+        bar_width = min(self.console.width - 4, 60)
+        filled = int(pct * bar_width)
+        filled = min(filled, bar_width)
+        threshold_pos = int(threshold * bar_width)
+
+        # Color: green below threshold, amber up to 90%, red above
+        if pct < threshold:
+            fill_color = GREEN
+        elif pct < 0.90:
+            fill_color = WARN_AMBER
+        else:
+            fill_color = ERROR_RED
+
+        # Build the bar character by character
+        bar = Text()
+        for i in range(bar_width):
+            if i == threshold_pos:
+                # Compaction marker — always visible
+                bar.append("│", style=f"bold {PURPLE_BOLD}")
+            elif i < filled:
+                bar.append("█", style=fill_color)
+            else:
+                bar.append("░", style=DIM)
+
+        # Header
+        header = Text()
+        header.append("  ⊹ ", style=PURPLE_BOLD)
+        header.append("Context Window", style=f"bold {PURPLE_BOLD}")
+        self.console.print(header)
+
+        # Bar
+        bar_line = Text("  ")
+        bar_line.append_text(bar)
+        self.console.print(bar_line)
+
+        # Stats line
+        stats = Text("  ")
+        stats.append(f"{current:,}", style=f"bold {fill_color}")
+        stats.append(f" / {window:,} tokens", style=DIM)
+        stats.append(f"  ({pct:.0%})", style=f"bold {fill_color}")
+        self.console.print(stats)
+
+        # Threshold label positioned under the marker
+        label = f"▲ {threshold:.0%} auto-compact"
+        pad = max(2 + threshold_pos - len(label) // 2, 2)
+        marker_line = Text(" " * pad)
+        marker_line.append(label, style=PURPLE)
+        self.console.print(marker_line)
 
     def show_permissions(self):
         """Display current permissions."""

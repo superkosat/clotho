@@ -36,6 +36,47 @@ def get_chat(chat_id: UUID, request: Request):
     return {"chat_id": str(chat_id), "turns": turns}
 
 
+@router.get("/{chat_id}/context")
+def get_context_info(chat_id: UUID, request: Request):
+    """Get context window usage for a chat session."""
+    manager = request.app.state.session_manager
+    try:
+        session = manager.get_or_load_session(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    ctrl = session.controller
+    if not ctrl.context or not ctrl.model:
+        raise HTTPException(status_code=400, detail="No active model or context")
+
+    try:
+        current_tokens = ctrl.model.count_tokens(ctrl.context, ctrl.tools)
+    except Exception:
+        current_tokens = ctrl._estimate_tokens_heuristic()
+
+    return {
+        "current_tokens": current_tokens,
+        "context_window": ctrl.context_window,
+        "compaction_threshold": 0.75,
+    }
+
+
+@router.post("/{chat_id}/compact")
+async def compact_chat(chat_id: UUID, request: Request):
+    """Manually trigger context compaction for a chat session."""
+    manager = request.app.state.session_manager
+    try:
+        session = manager.get_or_load_session(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    try:
+        metadata = await session.controller.compact_context()
+        return metadata
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.delete("/{chat_id}")
 def delete_chat(chat_id: UUID, request: Request):
     manager = request.app.state.session_manager

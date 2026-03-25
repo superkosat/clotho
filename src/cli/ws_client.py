@@ -26,7 +26,11 @@ class ClothoWebSocketClient:
 
     async def connect(self):
         """Connect to WebSocket."""
-        self.ws = await websockets.connect(self.url)
+        self.ws = await websockets.connect(
+            self.url,
+            ping_interval=30,
+            ping_timeout=120,
+        )
 
     async def disconnect(self):
         """Disconnect from WebSocket."""

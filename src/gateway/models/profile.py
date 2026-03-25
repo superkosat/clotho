@@ -10,6 +10,8 @@ class ModelProfile(BaseModel):
     model: str
     base_url: str | None = None
     api_key: str | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
 
     @field_validator("provider")
     @classmethod
@@ -26,14 +28,14 @@ class ModelProfileResponse(BaseModel):
     provider: str
     model: str
     base_url: str | None = None
-    api_key: str | None = None  # Will be masked
+    api_key: str | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
 
     @classmethod
     def from_profile(cls, profile: ModelProfile) -> "ModelProfileResponse":
-        """Create response model with masked API key."""
         masked_key = None
         if profile.api_key:
-            # Mask all but last 4 characters
             if len(profile.api_key) > 4:
                 masked_key = "..." + profile.api_key[-4:]
             else:
@@ -44,6 +46,8 @@ class ModelProfileResponse(BaseModel):
             model=profile.model,
             base_url=profile.base_url,
             api_key=masked_key,
+            context_window=profile.context_window,
+            max_output_tokens=profile.max_output_tokens,
         )
 
 

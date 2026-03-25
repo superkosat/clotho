@@ -7,6 +7,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from agent.core import ClothoController
+from agent.models.model_registry import lookup_model
 from agent.tools.schemas.bash import bash_tool
 from agent.tools.schemas.read import read_tool
 from agent.tools.schemas.write import write_tool
@@ -21,6 +22,7 @@ DEFAULT_TOOLS = [
     edit_tool,
 ]
 
+
 class SessionState:
     """Wraps a ClothoController with concurrency primitives for WebSocket runs."""
 
@@ -29,7 +31,7 @@ class SessionState:
         self.dispatcher = EventDispatcher()
         self.cancel_event = asyncio.Event()
         self.pending_approval: asyncio.Future | None = None
-        self.current_profile_name = current_profile_name  # Track active profile
+        self.current_profile_name = current_profile_name
 
 
 class SessionManager:
@@ -54,12 +56,10 @@ class SessionManager:
         return self._sessions.get(chat_id)
 
     def get_or_load_session(self, chat_id: UUID) -> SessionState:
-        """Get existing session or hydrate from disk (thread-safe)."""
         with self._lock:
             if chat_id in self._sessions:
                 return self._sessions[chat_id]
 
-        # Load outside lock (slow I/O), then check again
         controller = ClothoController()
         controller.register_tools(DEFAULT_TOOLS)
         profile_name = self._set_default_model(controller)
@@ -68,26 +68,34 @@ class SessionManager:
         state = SessionState(controller, current_profile_name=profile_name)
 
         with self._lock:
-            # Another thread may have loaded it while we were working
             if chat_id not in self._sessions:
                 self._sessions[chat_id] = state
             return self._sessions[chat_id]
 
-    def _set_default_model(self, controller: ClothoController) -> str | None:
-        """Load and apply default model profile if available.
+    @staticmethod
+    def _resolve_limits(profile) -> tuple[int | None, int | None]:
+        """Return (context_window, max_output_tokens) for a profile.
 
-        Returns:
-            The name of the profile that was applied, or None if no profile was set.
+        Profile values take precedence; registry fills in any that are None.
         """
+        registry = lookup_model(profile.model) or {}
+        context_window = profile.context_window or registry.get("context_window")
+        max_output_tokens = profile.max_output_tokens or registry.get("max_output_tokens")
+        return context_window, max_output_tokens
+
+    def _set_default_model(self, controller: ClothoController) -> str | None:
         try:
             default_name = ProfileService.get_default()
             if default_name:
                 profile = ProfileService.get_profile(default_name)
+                context_window, max_output_tokens = self._resolve_limits(profile)
                 controller.set_model(
                     provider=profile.provider,
                     model=profile.model,
                     base_url=profile.base_url,
                     api_key=profile.api_key,
+                    context_window=context_window,
+                    max_output_tokens=max_output_tokens,
                 )
                 return default_name
         except Exception as e:
@@ -102,13 +110,6 @@ class SessionManager:
         self._sessions.pop(chat_id, None)
 
     def panic_all(self) -> int:
-        """
-        Cancel all active sessions immediately and drain their queues.
-
-        Sets each session's cancel_event, resolves any pending tool approval
-        as denied, cancels the current run task, and drains all queued work so
-        nothing else starts. Returns the number of sessions affected.
-        """
         with self._lock:
             sessions = list(self._sessions.values())
         for state in sessions:
@@ -120,44 +121,38 @@ class SessionManager:
         return len(sessions)
 
     def switch_profile(self, chat_id: UUID, profile_name: str) -> None:
-        """Switch the active model profile for a session.
-
-        Args:
-            chat_id: The session ID
-            profile_name: The name of the profile to switch to
-
-        Raises:
-            ValueError: If session not found or profile doesn't exist
-        """
         state = self.get_or_load_session(chat_id)
-
-        # Get the profile and apply it
         profile = ProfileService.get_profile(profile_name)
+        context_window, max_output_tokens = self._resolve_limits(profile)
+
+        # Guard: refuse switch if current context would exceed the new model's window
+        if context_window:
+            current_tokens = (
+                state.controller._last_input_tokens
+                or state.controller._estimate_tokens_heuristic()
+            )
+            if current_tokens > context_window:
+                raise ValueError(
+                    f"Current context (~{current_tokens:,} tokens) exceeds "
+                    f"'{profile_name}' context window ({context_window:,} tokens). "
+                    f"Run /compact first, or stay on the current model."
+                )
+
         state.controller.set_model(
             provider=profile.provider,
             model=profile.model,
             base_url=profile.base_url,
             api_key=profile.api_key,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
         )
         state.current_profile_name = profile_name
 
     def get_active_profile(self, chat_id: UUID) -> str | None:
-        """Get the name of the currently active profile for a session.
-
-        Args:
-            chat_id: The session ID
-
-        Returns:
-            The name of the active profile, or None if no profile is set
-
-        Raises:
-            ValueError: If session not found
-        """
         state = self.get_or_load_session(chat_id)
         return state.current_profile_name
 
     def list_chats(self) -> list[str]:
-        """List all chat IDs from disk."""
         projects_dir = Path.home() / ".clotho" / "projects"
         if not projects_dir.exists():
             return []
