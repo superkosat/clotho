@@ -4,8 +4,6 @@ import asyncio
 import sys
 
 from rich.console import Console
-from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
@@ -52,7 +50,6 @@ class ClothoREPL:
         self.active_profile = None
         self.streaming = True
         self._response_buffer = ""
-        self._live: Live | None = None
         self._input = ClothoInput()
         self.loading_phrases = [
             "Thinking",
@@ -135,10 +132,11 @@ class ClothoREPL:
             self.spinner = None
 
     def _stop_live(self):
-        """Stop the Live markdown display if active."""
-        if self._live is not None:
-            self._live.stop()
-            self._live = None
+        """Flush and reset the streaming response buffer."""
+        if self._response_buffer:
+            if not self._response_buffer.endswith("\n"):
+                self.console.file.write("\n")
+                self.console.file.flush()
         self._response_buffer = ""
 
     def handle_message(self, message: dict):
@@ -157,12 +155,12 @@ class ClothoREPL:
             text = data.get("text", "")
             self._response_buffer += text
 
-            # Start Live display on first chunk, then update
-            if self._live is None:
-                self._live = Live(Markdown(self._response_buffer), console=self.console, auto_refresh=False)
-                self._live.start()
-            else:
-                self._live.update(Markdown(self._response_buffer), refresh=True)
+            # Write text directly to the terminal — no Live/Markdown re-rendering.
+            # This avoids two Rich Live issues: (1) red ellipsis truncation when
+            # content exceeds terminal height, (2) visual jumping from cursor-up
+            # redraws on growing content.
+            self.console.file.write(text)
+            self.console.file.flush()
 
         elif msg_type == "agent.tool_request":
             self._stop_spinner()
@@ -227,6 +225,10 @@ class ClothoREPL:
                 compact_msg.append(f"  {turns_removed} turns summarized", style=DIM)
             self.console.print(compact_msg)
 
+            # Restart spinner — the agent continues processing after compaction
+            self.spinner = ParticleSpinner(self.console, self.loading_phrases[0])
+            self.spinner.start()
+
         elif msg_type == "agent.error":
             self._stop_spinner()
             self._stop_live()
@@ -237,10 +239,10 @@ class ClothoREPL:
         elif msg_type == "agent.turn_complete":
             self._stop_spinner()
 
-            # Stop Live markdown display
-            if self._live is not None:
-                self._live.stop()
-                self._live = None
+            # Ensure streamed response ends with a newline
+            if self._response_buffer and not self._response_buffer.endswith("\n"):
+                self.console.file.write("\n")
+                self.console.file.flush()
             self._response_buffer = ""
 
             stop_reason = data.get("stop_reason", "")
@@ -339,7 +341,7 @@ class ClothoREPL:
 
             except CancelledInput:
                 # User pressed Escape - cancel current request if one is running
-                if self.spinner or self._live:
+                if self.spinner or self._response_buffer:
                     self._stop_spinner()
                     self._stop_live()
                     if self.ws_client:

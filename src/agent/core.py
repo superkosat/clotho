@@ -413,13 +413,17 @@ class ClothoController():
         emit: Callable[[str, dict], Awaitable[None]],
         cancel_event: asyncio.Event | None = None,
     ) -> AssistantTurn:
-        q: queue.Queue[StreamDelta | None] = queue.Queue()
+        q: queue.Queue[StreamDelta | BaseException | None] = queue.Queue()
 
         def _produce():
-            for delta in self.stream_invoke(turn):
-                if cancel_event and cancel_event.is_set():
-                    break
-                q.put(delta)
+            try:
+                for delta in self.stream_invoke(turn):
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    q.put(delta)
+            except BaseException as exc:
+                q.put(exc)
+                return
             q.put(None)
 
         thread = asyncio.get_event_loop().run_in_executor(None, _produce)
@@ -434,6 +438,8 @@ class ClothoController():
                 continue
             if delta is None:
                 break
+            if isinstance(delta, BaseException):
+                raise delta
             if delta.type == "text_delta":
                 await emit("agent.text_delta", {"text": delta.text})
             elif delta.type == "tool_use_start":

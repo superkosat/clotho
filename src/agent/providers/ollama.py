@@ -6,7 +6,7 @@ from agent.models.turn import Turn, AssistantTurn, SystemTurn, UserTurn
 from agent.models.stream_delta import StreamDelta
 from agent.models.content_block import TextContent, ImageContent, ToolUseContent, ToolResultContent
 from agent.models.usage import Usage
-from ollama import chat
+import ollama
 
 _COMPACTION_SYSTEM = (
     "You are a conversation summarizer. Produce a dense, factual summary of the "
@@ -17,13 +17,16 @@ _COMPACTION_SYSTEM = (
 )
 
 
+_STREAM_TIMEOUT = 120  # seconds — surfaces a hang as an error instead of spinning forever
+
+
 class OllamaModel(LLM):
     def __init__(
         self,
         model: str,
     ):
         self.model = model
-        self.client = chat
+        self.client = ollama.Client(timeout=_STREAM_TIMEOUT)
 
     def stream_invoke(self, messages: list[Turn], tools: list[Tool] | None, max_tokens: int | None) -> Iterator[StreamDelta]:
         ollama_messages = self._to_ollama_messages(messages)
@@ -33,7 +36,7 @@ class OllamaModel(LLM):
         if max_tokens is not None:
             options['num_predict'] = max_tokens
 
-        stream = self.client(
+        stream = self.client.chat(
             model=self.model,
             messages=ollama_messages,
             tools=converted_tools,
@@ -109,7 +112,7 @@ class OllamaModel(LLM):
         if max_tokens is not None:
             options['num_predict'] = max_tokens
 
-        response = self.client(
+        response = self.client.chat(
             model=self.model,
             messages=ollama_messages,
             tools=tools,
@@ -148,7 +151,7 @@ class OllamaModel(LLM):
         ])
 
         options: dict = {'think': False, 'num_predict': max_summary_tokens}
-        response = self.client(
+        response = self.client.chat(
             model=self.model,
             messages=messages,
             options=options,
