@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cli.api_client import ClothoAPIClient
-from cli.theme import GREEN, PURPLE, DIM, ERROR_RED, WARN_AMBER
+from cli.theme import GREEN, GREEN_BOLD, PURPLE, PURPLE_BOLD, DIM, ERROR_RED, WARN_AMBER
 
 
 class CommandHandler:
@@ -165,6 +165,75 @@ class CommandHandler:
             self.console.print(msg)
         except Exception as e:
             self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+
+    def handle_context(self, chat_id: str) -> None:
+        """Display context window usage visualization."""
+        if not chat_id:
+            self.console.print(f"[{ERROR_RED}]No active chat session[/{ERROR_RED}]")
+            return
+        try:
+            info = self.api.get_context_info(chat_id)
+        except Exception as e:
+            self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+            return
+
+        current = info["current_tokens"]
+        window = info["context_window"]
+        threshold = info["compaction_threshold"]
+
+        if not window:
+            self.console.print(f"[{WARN_AMBER}]No context window configured for this model[/{WARN_AMBER}]")
+            return
+
+        pct = current / window
+        bar_width = min(self.console.width - 4, 60)
+        filled = int(pct * bar_width)
+        filled = min(filled, bar_width)
+        threshold_pos = int(threshold * bar_width)
+
+        # Color: green below threshold, amber up to 90%, red above
+        if pct < threshold:
+            fill_color = GREEN
+        elif pct < 0.90:
+            fill_color = WARN_AMBER
+        else:
+            fill_color = ERROR_RED
+
+        # Build the bar character by character
+        bar = Text()
+        for i in range(bar_width):
+            if i == threshold_pos:
+                # Compaction marker — always visible
+                bar.append("│", style=f"bold {PURPLE_BOLD}")
+            elif i < filled:
+                bar.append("█", style=fill_color)
+            else:
+                bar.append("░", style=DIM)
+
+        # Header
+        header = Text()
+        header.append("  ⊹ ", style=PURPLE_BOLD)
+        header.append("Context Window", style=f"bold {PURPLE_BOLD}")
+        self.console.print(header)
+
+        # Bar
+        bar_line = Text("  ")
+        bar_line.append_text(bar)
+        self.console.print(bar_line)
+
+        # Stats line
+        stats = Text("  ")
+        stats.append(f"{current:,}", style=f"bold {fill_color}")
+        stats.append(f" / {window:,} tokens", style=DIM)
+        stats.append(f"  ({pct:.0%})", style=f"bold {fill_color}")
+        self.console.print(stats)
+
+        # Threshold label positioned under the marker
+        label = f"▲ {threshold:.0%} auto-compact"
+        pad = max(2 + threshold_pos - len(label) // 2, 2)
+        marker_line = Text(" " * pad)
+        marker_line.append(label, style=PURPLE)
+        self.console.print(marker_line)
 
     def show_permissions(self):
         """Display current permissions."""

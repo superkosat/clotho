@@ -264,6 +264,15 @@ class ClothoAPIClient:
 
     # Control endpoints
 
+    def get_context_info(self, chat_id: str) -> dict:
+        """Get context window usage for a chat."""
+        response = requests.get(
+            f"{self.base_url}/api/chats/{chat_id}/context",
+            headers=self.headers,
+        )
+        _handle_response(response)
+        return response.json()
+
     def compact_chat(self, chat_id: str) -> dict:
         """Trigger manual context compaction for a chat."""
         response = requests.post(

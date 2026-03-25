@@ -453,6 +453,8 @@ class ClothoREPL:
             self.command_handler.handle_sandbox(args)
         elif cmd == "compact":
             await self.command_handler.handle_compact(self.chat_id)
+        elif cmd == "context":
+            self.command_handler.handle_context(self.chat_id)
         else:
             self.console.print(f"[{ERROR_RED}]Unknown command: /{cmd}[/{ERROR_RED}]")
             self.console.print(f"Type [{GREEN}]/help[/{GREEN}] for available commands")
@@ -498,6 +500,7 @@ class ClothoREPL:
             ("/sandbox on|off", "Enable or disable the sandbox"),
             ("/sandbox build", "Build the sandbox Docker image"),
             ("/compact", "Summarize old conversation turns to free context space"),
+            ("/context", "Show context window usage"),
         ]
 
         max_cmd_len = max(len(cmd) for cmd, _ in commands)
