@@ -1,5 +1,7 @@
 """Command handlers for REPL slash commands."""
 
+import asyncio
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -90,7 +92,6 @@ class CommandHandler:
 
     async def add_profile(self):
         """Interactive profile creation."""
-        import asyncio
         from agent.models.model_registry import lookup_model
         try:
             name = await asyncio.to_thread(self.console.input, "Profile name: ")
@@ -148,23 +149,32 @@ class CommandHandler:
         if not chat_id:
             self.console.print(f"[{ERROR_RED}]No active chat session[/{ERROR_RED}]")
             return
+
+        from cli.animation import ParticleSpinner
+
+        spinner = ParticleSpinner(self.console, "Compacting context")
+        spinner.start()
         try:
-            metadata = self.api.compact_chat(chat_id)
-            tokens_before = metadata.get("tokens_before", 0)
-            tokens_after = metadata.get("tokens_after")
-            turns_removed = metadata.get("turns_removed", 0)
-            msg = Text()
-            msg.append("  ✦ Compaction complete", style=f"bold {GREEN}")
-            if tokens_after is not None:
-                msg.append(
-                    f"  {tokens_before:,} → {tokens_after:,} tokens, {turns_removed} turns summarized",
-                    style=DIM
-                )
-            else:
-                msg.append(f"  {turns_removed} turns summarized", style=DIM)
-            self.console.print(msg)
+            metadata = await asyncio.to_thread(self.api.compact_chat, chat_id)
         except Exception as e:
+            spinner.stop()
             self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+            return
+        spinner.stop()
+
+        tokens_before = metadata.get("tokens_before", 0)
+        tokens_after = metadata.get("tokens_after")
+        turns_removed = metadata.get("turns_removed", 0)
+        msg = Text()
+        msg.append("  ✦ Compaction complete", style=f"bold {GREEN}")
+        if tokens_after is not None:
+            msg.append(
+                f"  {tokens_before:,} → {tokens_after:,} tokens, {turns_removed} turns summarized",
+                style=DIM
+            )
+        else:
+            msg.append(f"  {turns_removed} turns summarized", style=DIM)
+        self.console.print(msg)
 
     def handle_context(self, chat_id: str) -> None:
         """Display context window usage visualization."""
