@@ -4,7 +4,6 @@ import asyncio
 import sys
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.text import Text
 
 from cli.animation import ParticleSpinner
@@ -17,6 +16,8 @@ from cli.theme import (
     GREEN, GREEN_BOLD, PURPLE, PURPLE_BOLD,
     DIM, ERROR_RED, WARN_AMBER,
 )
+from cli.picker import pick, PickerCancelled
+from cli.ui import LOADING_PHRASES, print_error, print_muted, print_warning, styled_panel
 from cli.ws_client import ClothoWebSocketClient
 
 
@@ -51,18 +52,6 @@ class ClothoREPL:
         self.streaming = True
         self._response_buffer = ""
         self._input = ClothoInput()
-        self.loading_phrases = [
-            "Thinking",
-            "Processing",
-            "Analyzing",
-            "Working on it",
-            "Computing",
-            "Considering",
-            "Pondering",
-            "Cogitating",
-            "Deliberating",
-            "Reasoning",
-        ]
 
     def setup(self):
         """Load token and create clients."""
@@ -70,7 +59,7 @@ class ClothoREPL:
 
         self.token = load_token()
         if not self.token:
-            self.console.print(f"[{ERROR_RED}]No auth token found. Run: clotho setup[/{ERROR_RED}]")
+            print_error(self.console, "No auth token found. Run: clotho setup")
             sys.exit(1)
 
         # Create API client
@@ -117,9 +106,9 @@ class ClothoREPL:
         phrase_index = 0
         while self.rotating_phrases and self.spinner:
             try:
-                phrase = self.loading_phrases[phrase_index]
+                phrase = LOADING_PHRASES[phrase_index]
                 self.spinner.update_label(phrase)
-                phrase_index = (phrase_index + 1) % len(self.loading_phrases)
+                phrase_index = (phrase_index + 1) % len(LOADING_PHRASES)
                 await asyncio.sleep(1.5)
             except Exception:
                 break
@@ -166,21 +155,15 @@ class ClothoREPL:
             self._stop_spinner()
             self._stop_live()
 
-            # Tool approval required - display all tools
             tool_calls = data.get("tool_calls", [])
-            header = Text()
-            header.append("\n  ", style="")
-            header.append("⊹ ", style=PURPLE_BOLD)
-            header.append(f"Tool approval required ", style=f"bold {PURPLE}")
-            header.append(f"({len(tool_calls)} tool(s))", style=DIM)
-            self.console.print(header)
+            self.console.print()
             for tool in tool_calls:
                 tool_name = tool.get("name", "unknown")
                 tool_args = tool.get("arguments", {})
                 line = Text()
-                line.append("    ✦ ", style=PURPLE)
+                line.append("● ", style=PURPLE)
                 line.append(tool_name, style=f"bold {PURPLE_BOLD}")
-                line.append(f": {tool_args}", style=DIM)
+                line.append(f"  {tool_args}", style=DIM)
                 self.console.print(line)
 
             # Set pending approval flag and wake up the loop
@@ -193,12 +176,12 @@ class ClothoREPL:
             is_error = data.get("is_error", False)
 
             if is_error:
-                self.console.print(f"[{ERROR_RED}]Tool error: {content}[/{ERROR_RED}]")
+                print_error(self.console, f"Tool error: {content}")
             else:
                 # Truncate long results
                 if len(content) > 500:
                     content = content[:500] + "... (truncated)"
-                self.console.print(f"[{DIM}]Result: {content}[/{DIM}]")
+                print_muted(self.console, f"Result: {content}")
 
         elif msg_type == "agent.compaction_started":
             tokens_before = data.get("tokens_before", 0)
@@ -226,14 +209,14 @@ class ClothoREPL:
             self.console.print(compact_msg)
 
             # Restart spinner — the agent continues processing after compaction
-            self.spinner = ParticleSpinner(self.console, self.loading_phrases[0])
+            self.spinner = ParticleSpinner(self.console, LOADING_PHRASES[0])
             self.spinner.start()
 
         elif msg_type == "agent.error":
             self._stop_spinner()
             self._stop_live()
             error = data.get("message", "Unknown error")
-            self.console.print(f"\n[{ERROR_RED}]Error: {error}[/{ERROR_RED}]")
+            print_error(self.console, f"\nError: {error}")
             self.response_complete.set()
 
         elif msg_type == "agent.turn_complete":
@@ -248,7 +231,7 @@ class ClothoREPL:
             stop_reason = data.get("stop_reason", "")
             model = data.get("model", "")
             done = Text()
-            done.append("✦ Done", style=f"bold {GREEN}")
+            done.append("● Done", style=f"bold {GREEN}")
             done.append(f" ({model} - {stop_reason})", style=DIM)
             self.console.print(done)
             self.pending_approval = False
@@ -258,8 +241,8 @@ class ClothoREPL:
             self._stop_spinner()
             self._stop_live()
             error_msg = data.get("message", "Unknown connection error")
-            self.console.print(f"\n[{ERROR_RED}]⊹ WebSocket connection lost: {error_msg}[/{ERROR_RED}]")
-            self.console.print(f"[{WARN_AMBER}]The gateway may have restarted. Try /quit and restart.[/{WARN_AMBER}]")
+            print_error(self.console, f"\n⊹ WebSocket connection lost: {error_msg}")
+            print_warning(self.console, "The gateway may have restarted. Try /exit and restart.")
             self.running = False
 
     async def _switch_chat(self, chat_id: str):
@@ -280,9 +263,9 @@ class ClothoREPL:
             try:
                 self.api_client.set_active_profile(self.chat_id, self.active_profile)
             except Exception as e:
-                self.console.print(f"[{WARN_AMBER}]Warning: Could not apply profile '{self.active_profile}': {e}[/{WARN_AMBER}]")
+                print_warning(self.console, f"Warning: Could not apply profile '{self.active_profile}': {e}")
 
-        self.console.print(f"[{DIM}]Connected to chat: {self.chat_id}[/{DIM}]")
+        print_muted(self.console, f"Connected to chat: {self.chat_id}")
 
     async def repl_loop(self):
         """Main REPL loop."""
@@ -317,7 +300,7 @@ class ClothoREPL:
         hints = Text()
         hints.append("  /help", style=GREEN)
         hints.append(" commands  ", style=DIM)
-        hints.append("/quit", style=GREEN)
+        hints.append("/exit", style=GREEN)
         hints.append(" exit", style=DIM)
         self.console.print(hints, justify="center")
         self.console.print()
@@ -351,11 +334,11 @@ class ClothoREPL:
                     self.console.print(cancel_msg)
                 # Otherwise just ignore the escape
             except KeyboardInterrupt:
-                self.console.print(f"\n[{WARN_AMBER}]Use /quit to exit[/{WARN_AMBER}]")
+                print_warning(self.console, "\nUse /exit to quit")
             except EOFError:
                 break
             except Exception as e:
-                self.console.print(f"[{ERROR_RED}]Error: {e}[/{ERROR_RED}]")
+                print_error(self.console, f"Error: {e}")
 
     async def _send_and_wait(self, message: str):
         """Send a message to the agent and wait for the complete response.
@@ -367,7 +350,7 @@ class ClothoREPL:
         await self.ws_client.send_message(message, stream=self.streaming)
 
         # Start particle spinner
-        self.spinner = ParticleSpinner(self.console, self.loading_phrases[0])
+        self.spinner = ParticleSpinner(self.console, LOADING_PHRASES[0])
         self.spinner.start()
 
         # Start phrase rotation in background
@@ -380,21 +363,22 @@ class ClothoREPL:
                 await self.response_complete.wait()
 
                 if self.pending_approval:
-                    response = await self._input.confirm("Approve tools? (y/n):")
-                    if response.lower() == "y":
+                    try:
+                        choice = await pick(
+                            "Tool approval",
+                            [("allow", "✓ Allow"), ("deny", "✗ Deny")],
+                        )
+                    except PickerCancelled:
+                        choice = "deny"
+
+                    if choice == "allow":
                         await self.ws_client.approve_tools()
-                        approved = Text()
-                        approved.append("  ✦ Approved", style=f"bold {GREEN}")
-                        self.console.print(approved)
                     else:
                         await self.ws_client.deny_tools()
-                        denied = Text()
-                        denied.append("  ✦ Denied", style=f"bold {ERROR_RED}")
-                        self.console.print(denied)
                     self.pending_approval = False
 
                     # Restart particle spinner for tool execution
-                    self.spinner = ParticleSpinner(self.console, self.loading_phrases[0])
+                    self.spinner = ParticleSpinner(self.console, LOADING_PHRASES[0])
                     self.spinner.start()
                     self.rotating_phrases = True
                     rotation_task = asyncio.create_task(self.rotate_loading_phrases())
@@ -421,7 +405,7 @@ class ClothoREPL:
         cmd = parts[0][1:]  # Remove leading /
         args = parts[1:]
 
-        if cmd == "quit":
+        if cmd in ("quit", "exit"):
             self.running = False
         elif cmd == "help":
             self.show_help()
@@ -456,7 +440,7 @@ class ClothoREPL:
         elif cmd == "context":
             self.command_handler.handle_context(self.chat_id)
         else:
-            self.console.print(f"[{ERROR_RED}]Unknown command: /{cmd}[/{ERROR_RED}]")
+            print_error(self.console, f"Unknown command: /{cmd}")
             self.console.print(f"Type [{GREEN}]/help[/{GREEN}] for available commands")
 
     def handle_stream(self, args: list[str]):
@@ -471,9 +455,9 @@ class ClothoREPL:
             self.console.print(f"[{GREEN}]Streaming enabled[/{GREEN}]")
         elif args[0] == "off":
             self.streaming = False
-            self.console.print(f"[{WARN_AMBER}]Streaming disabled[/{WARN_AMBER}]")
+            print_warning(self.console, "Streaming disabled")
         else:
-            self.console.print(f"[{ERROR_RED}]Usage: /stream [on|off][/{ERROR_RED}]")
+            print_error(self.console, "Usage: /stream [on|off]")
 
     def show_help(self):
         """Display help text."""
@@ -482,7 +466,7 @@ class ClothoREPL:
 
         commands = [
             ("/help", "Show this help"),
-            ("/quit", "Exit Clotho"),
+            ("/exit", "Exit Clotho"),
             ("/profiles", "List model profiles"),
             ("/profile add", "Add new profile"),
             ("/profile use <name>", "Switch to profile for this chat"),
@@ -510,11 +494,7 @@ class ClothoREPL:
             help_text.append(f"{padding}{desc}\n", style=DIM)
 
         help_text.append("\nType a message to chat with the agent.", style="")
-        self.console.print(Panel(
-            help_text,
-            title=f"[bold {GREEN}]Help[/bold {GREEN}]",
-            border_style=PURPLE,
-        ))
+        styled_panel(self.console, help_text, "Help")
 
 
 def run_noninteractive(
@@ -632,10 +612,10 @@ def run_repl(host: str = "127.0.0.1", port: int = 8000, initial_prompt: str | No
 
     async def async_main():
         with GatewayManager(host, port):
-            repl.console.print(f"[{DIM}]Starting gateway...[/{DIM}]")
+            print_muted(repl.console, "Starting gateway...")
             repl.setup()
             await repl.start_session()
-            repl.console.print(f"[{DIM}]Connected to chat: {repl.chat_id}[/{DIM}]")
+            print_muted(repl.console, f"Connected to chat: {repl.chat_id}")
             await repl.repl_loop()
 
             # Cleanup
@@ -645,4 +625,4 @@ def run_repl(host: str = "127.0.0.1", port: int = 8000, initial_prompt: str | No
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
-        repl.console.print(f"\n[{WARN_AMBER}]Goodbye![/{WARN_AMBER}]")
+        print_warning(repl.console, "\nGoodbye!")
