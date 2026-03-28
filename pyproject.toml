@@ -31,6 +31,7 @@ dependencies = [
     "discord.py>=2.0",
     "tiktoken>=0.7.0",
     "questionary>=2.1.1",
+    "apscheduler>=3.11.2",
 ]
 
 

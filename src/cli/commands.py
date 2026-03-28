@@ -394,3 +394,8 @@ class CommandHandler:
         else:
             print_error(self.console, "Invalid sandbox command")
             self.console.print("Usage: /sandbox [on|off|build]")
+
+    async def handle_setup(self) -> None:
+        """Launch the interactive channel setup wizard."""
+        from cli.setup import run_channel_setup
+        await run_channel_setup(self.console)

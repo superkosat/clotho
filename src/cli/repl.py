@@ -439,6 +439,8 @@ class ClothoREPL:
             await self.command_handler.handle_compact(self.chat_id)
         elif cmd == "context":
             self.command_handler.handle_context(self.chat_id)
+        elif cmd == "setup":
+            await self.command_handler.handle_setup()
         else:
             print_error(self.console, f"Unknown command: /{cmd}")
             self.console.print(f"Type [{GREEN}]/help[/{GREEN}] for available commands")
@@ -485,6 +487,7 @@ class ClothoREPL:
             ("/sandbox build", "Build the sandbox Docker image"),
             ("/compact", "Summarize old conversation turns to free context space"),
             ("/context", "Show context window usage"),
+            ("/setup", "Configure a messaging channel (Discord, ...)"),
         ]
 
         max_cmd_len = max(len(cmd) for cmd, _ in commands)
