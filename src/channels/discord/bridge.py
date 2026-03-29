@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
-
 import discord
 
 from channels.discord.config import BridgeConfig
 from channels.discord.session_map import SessionMap
 from cli.api_client import ClothoAPIClient
 from cli.ws_client import ClothoWebSocketClient
+from scheduler.job import DeliveryTarget
+from scheduler.scheduler import ClothoScheduler, register_delivery_handler
 
 
 def _log(msg: str) -> None:
@@ -35,6 +36,20 @@ class DiscordBridge:
         self.client.on_ready = self._on_ready
         self.client.on_message = self._on_message
 
+        # Scheduler — shares the event loop with the Discord client.
+        # Uses the bridge's own sessions file so scheduled jobs run in the
+        # same chat sessions as interactive messages for a given channel/user.
+        self._scheduler = ClothoScheduler(
+            gateway_host=config.host,
+            gateway_port=config.port,
+            gateway_token=config.token,
+            sessions_path=str(self.session_map._path),
+        )
+        # Register this bridge's Discord client as the delivery backend.
+        # Other bridges register their own handlers for their channel types.
+        register_delivery_handler("discord_channel", self._deliver_to_channel)
+        register_delivery_handler("discord_dm", self._deliver_dm)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -49,6 +64,10 @@ class DiscordBridge:
 
     async def _on_ready(self) -> None:
         print(f"[clotho-discord] Logged in as {self.client.user}")
+        count = self._scheduler.load_jobs()
+        self._scheduler.start()
+        if count:
+            _log(f"Scheduler started with {count} job(s)")
 
     async def _on_message(self, message: discord.Message) -> None:
         # Ignore messages from bots (including ourselves)
@@ -106,7 +125,7 @@ class DiscordBridge:
 
         async with message.channel.typing():
             try:
-                response = await self._run_agent(session_key, text)
+                response = await self._run_agent(session_key, text, message.channel)
             except Exception as exc:
                 _log(f"Agent error: {exc}")
                 response = f"Sorry, something went wrong: {exc}"
@@ -128,7 +147,7 @@ class DiscordBridge:
     # Agent interaction
     # ------------------------------------------------------------------
 
-    async def _run_agent(self, session_key: str, text: str) -> str:
+    async def _run_agent(self, session_key: str, text: str, channel: discord.abc.Messageable | None = None) -> str:
         """Send a message to the Clotho gateway and collect the full response."""
         chat_id = self.session_map.get(session_key)
         if not chat_id:
@@ -173,6 +192,15 @@ class DiscordBridge:
                 case "agent.turn_complete":
                     _log("Turn complete")
                     done.set()
+                case "agent.context_compacted":
+                    turns = data.get("data", {}).get("turns_removed", 0)
+                    _log(f"Context compacted ({turns} turns removed)")
+                    if channel is not None:
+                        asyncio.create_task(
+                            channel.send(
+                                f"_Compacting context ({turns} turns removed) — still working…_"
+                            )
+                        )
                 case _:
                     _log(f"Unhandled event: {event_type}")
 
@@ -253,3 +281,22 @@ class DiscordBridge:
         if remaining:
             chunks.append(remaining)
         return chunks
+
+    # ------------------------------------------------------------------
+    # Scheduled job delivery
+    # ------------------------------------------------------------------
+
+    async def _deliver_to_channel(self, target: DeliveryTarget, content: str) -> None:
+        """Deliver a job response to a Discord channel."""
+        channel_id = int(target.params["channel_id"])
+        channel = self.client.get_channel(channel_id) or await self.client.fetch_channel(channel_id)
+        for chunk in self._chunk(content):
+            await channel.send(chunk)
+
+    async def _deliver_dm(self, target: DeliveryTarget, content: str) -> None:
+        """Deliver a job response as a Discord DM to a user."""
+        user_id = int(target.params["user_id"])
+        user = await self.client.fetch_user(user_id)
+        dm = await user.create_dm()
+        for chunk in self._chunk(content):
+            await dm.send(chunk)
