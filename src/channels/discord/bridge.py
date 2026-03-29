@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import re
 import sys
+import tempfile
+from pathlib import Path
+
 import discord
 
 from channels.discord.config import BridgeConfig
@@ -90,7 +95,7 @@ class DiscordBridge:
         text = message.content
         if is_mentioned:
             text = text.replace(f"<@{self.client.user.id}>", "").strip()
-        if not text:
+        if not text and not message.attachments:
             return
 
         # Check for emergency stop codewords before routing to the agent.
@@ -123,9 +128,22 @@ class DiscordBridge:
         session_key = self._session_key(message)
         _log(f"Message from {message.author}: {text[:80]!r}")
 
+        # Process attachments into content blocks.
+        # When attachments are present, the user's text and all attachment
+        # blocks are combined into a single multi-modal content list so the
+        # controller builds one UserTurn containing everything.
+        content_blocks = await self._process_attachments(message.attachments)
+        if content_blocks:
+            # Prepend the user's text (if any) so the model sees it alongside attachments
+            if text:
+                content_blocks.insert(0, {"type": "text", "text": text})
+
         async with message.channel.typing():
             try:
-                response = await self._run_agent(session_key, text, message.channel)
+                response = await self._run_agent(
+                    session_key, text, message.channel,
+                    content_blocks=content_blocks or None,
+                )
             except Exception as exc:
                 _log(f"Agent error: {exc}")
                 response = f"Sorry, something went wrong: {exc}"
@@ -133,6 +151,9 @@ class DiscordBridge:
         if not response:
             _log("Empty response from agent, not replying")
             return
+
+        # Extract reaction directives ({{react:emoji}}) before sending text
+        response, reactions = self._extract_reactions(response)
 
         _log(f"Sending response ({len(response)} chars)")
         chunks = self._chunk(response)
@@ -143,11 +164,24 @@ class DiscordBridge:
         except Exception as exc:
             _log(f"Failed to send reply: {exc}")
 
+        # Apply agent-requested reactions to the user's original message
+        for emoji in reactions:
+            try:
+                await message.add_reaction(emoji)
+            except Exception as exc:
+                _log(f"Failed to add reaction {emoji!r}: {exc}")
+
     # ------------------------------------------------------------------
     # Agent interaction
     # ------------------------------------------------------------------
 
-    async def _run_agent(self, session_key: str, text: str, channel: discord.abc.Messageable | None = None) -> str:
+    async def _run_agent(
+        self,
+        session_key: str,
+        text: str,
+        channel: discord.abc.Messageable | None = None,
+        content_blocks: list[dict] | None = None,
+    ) -> str:
         """Send a message to the Clotho gateway and collect the full response."""
         chat_id = self.session_map.get(session_key)
         if not chat_id:
@@ -176,11 +210,28 @@ class DiscordBridge:
                 case "agent.text":
                     parts.append(data.get("data", {}).get("text", ""))
                 case "agent.tool_request":
+                    calls = data.get("data", {}).get("tool_calls", [])
+                    names = [tc.get("name", "?") for tc in calls]
+                    _log(f"Tool approval requested: {names}")
                     if self.config.tool_approval == "auto_allow":
                         asyncio.create_task(ws.approve_tools())
                     else:
                         _log("Auto-denying tool request")
                         asyncio.create_task(ws.deny_tools())
+                case "agent.tool_denied":
+                    reason = data.get("data", {}).get("reason", "")
+                    _log(f"Tool denied by policy: {reason}")
+                case "agent.tool_use_start":
+                    d = data.get("data", {})
+                    _log(f"Tool call: {d.get('tool_call_name', '?')}()")
+                case "agent.tool_result":
+                    d = data.get("data", {})
+                    name = d.get("tool_name", "?")
+                    is_err = d.get("is_error", False)
+                    content = d.get("content", "")
+                    preview = content[:200] + "…" if len(content) > 200 else content
+                    status = "ERROR" if is_err else "ok"
+                    _log(f"Tool result [{name}] ({status}): {preview}")
                 case "agent.cancelled":
                     _log("Run cancelled")
                     done.set()
@@ -208,7 +259,7 @@ class DiscordBridge:
         listen_task = asyncio.create_task(ws.listen())
 
         try:
-            await ws.send_message(text, stream=True)
+            await ws.send_message(text, stream=True, content_blocks=content_blocks)
             _log("Message sent, waiting for response...")
             await asyncio.wait_for(done.wait(), timeout=120)
         except asyncio.TimeoutError:
@@ -228,8 +279,98 @@ class DiscordBridge:
         return "".join(parts)
 
     # ------------------------------------------------------------------
+    # Attachment processing
+    # ------------------------------------------------------------------
+
+    _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    _AUDIO_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a", ".flac"}
+    _TEXT_EXTENSIONS = {
+        ".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml",
+        ".py", ".js", ".ts", ".html", ".css", ".sh", ".toml", ".ini",
+        ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".php",
+    }
+    _MAX_TEXT_SIZE = 100_000  # 100 KB — skip very large text files
+
+    async def _process_attachments(
+        self, attachments: list[discord.Attachment]
+    ) -> list[dict]:
+        """Download Discord attachments and convert to content block dicts."""
+        blocks: list[dict] = []
+        for att in attachments:
+            ext = Path(att.filename).suffix.lower()
+            try:
+                if ext in self._IMAGE_EXTENSIONS:
+                    data = await att.read()
+                    b64 = base64.b64encode(data).decode()
+                    media_type = att.content_type or f"image/{ext.lstrip('.')}"
+                    blocks.append({
+                        "type": "image",
+                        "source_type": "base64",
+                        "media_type": media_type,
+                        "data": b64,
+                    })
+                    _log(f"Attached image: {att.filename} ({len(data)} bytes)")
+
+                elif ext in self._AUDIO_EXTENSIONS:
+                    # Save to temp file — agent can transcribe via whisper-transcribe skill
+                    tmp = Path(tempfile.gettempdir()) / f"clotho_{att.filename}"
+                    data = await att.read()
+                    tmp.write_bytes(data)
+                    blocks.append({
+                        "type": "text",
+                        "text": (
+                            f"[Audio message received: {att.filename} "
+                            f"({len(data)} bytes), saved to: {tmp}. "
+                            f"Use the whisper-transcribe skill to transcribe this file, "
+                            f"then respond to what the user said. "
+                            f"Do NOT repeat the transcription — reply conversationally.]"
+                        ),
+                    })
+                    _log(f"Attached audio: {att.filename} → {tmp}")
+
+                elif ext in self._TEXT_EXTENSIONS and att.size <= self._MAX_TEXT_SIZE:
+                    data = await att.read()
+                    text_content = data.decode("utf-8", errors="replace")
+                    blocks.append({
+                        "type": "text",
+                        "text": (
+                            f"[Attached file: {att.filename}]\n"
+                            f"```\n{text_content}\n```"
+                        ),
+                    })
+                    _log(f"Attached text file: {att.filename} ({len(data)} bytes)")
+
+                else:
+                    blocks.append({
+                        "type": "text",
+                        "text": (
+                            f"[Attached file: {att.filename} "
+                            f"({att.content_type or 'unknown type'}, {att.size} bytes) "
+                            f"— binary file, contents not included]"
+                        ),
+                    })
+                    _log(f"Attached binary file (noted): {att.filename}")
+
+            except Exception as exc:
+                _log(f"Failed to process attachment {att.filename}: {exc}")
+                blocks.append({
+                    "type": "text",
+                    "text": f"[Failed to process attachment: {att.filename} — {exc}]",
+                })
+
+        return blocks
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    _REACT_PATTERN = re.compile(r"\{\{react:([^}]+)\}\}")
+
+    def _extract_reactions(self, text: str) -> tuple[str, list[str]]:
+        """Strip {{react:emoji}} directives from text, return cleaned text and emoji list."""
+        reactions = self._REACT_PATTERN.findall(text)
+        cleaned = self._REACT_PATTERN.sub("", text).strip()
+        return cleaned, reactions
 
     def _session_key(self, message: discord.Message) -> str:
         if self.config.session_mode == "channel":

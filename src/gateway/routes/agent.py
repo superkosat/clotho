@@ -110,6 +110,7 @@ async def agent_websocket(websocket: WebSocket, chat_id: UUID):
                     # loop variable `data` being mutated in later iterations.
                     msg = data["message"]
                     stream = data.get("stream", False)
+                    content = data.get("content")  # optional multi-modal content blocks
                     event = GatewayEvent(
                         type="run",
                         data=data,
@@ -118,7 +119,7 @@ async def agent_websocket(websocket: WebSocket, chat_id: UUID):
                     )
                     session.dispatcher.submit(
                         event,
-                        lambda m=msg, s=stream: service.handle_run(m, s),
+                        lambda m=msg, s=stream, c=content: service.handle_run(m, s, content=c),
                     )
                 case "tool_approval":
                     # Tool approvals resolve the pending future in the currently

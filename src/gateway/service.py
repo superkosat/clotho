@@ -19,7 +19,12 @@ class AgentService:
         self.session = session
         self.ws = websocket
 
-    async def handle_run(self, message: str, stream: bool = False):
+    async def handle_run(
+        self,
+        message: str,
+        stream: bool = False,
+        content: list[dict] | None = None,
+    ):
         """Execute an agent run. Called by the dispatcher — guaranteed not concurrent."""
         self.session.cancel_event.clear()
         try:
@@ -29,6 +34,7 @@ class AgentService:
                 request_approval=self._request_approval,
                 stream=stream,
                 cancel_event=self.session.cancel_event,
+                content=content,
             )
         except asyncio.CancelledError:
             # Run was cancelled (via cancel_event checkpoint or direct task cancellation).

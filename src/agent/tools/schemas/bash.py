@@ -11,6 +11,10 @@ bash_tool = Tool(
       "command": {
         "type": "string",
         "description": "The bash command to execute"
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "Max execution time in seconds (default 60, max 300). Increase for long-running commands like transcription or builds."
       }
     },
     "required": ["command"]

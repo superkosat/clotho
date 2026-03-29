@@ -45,20 +45,54 @@ def win_to_wsl_path(path: str) -> str:
 
 
 def translate_paths_for_wsl(command: str) -> str:
-    """Find Windows-style absolute paths in a command and convert them to WSL paths."""
+    """Find Windows-style absolute paths in a command and convert them to WSL paths.
+
+    Skips paths inside cmd.exe /c or powershell.exe arguments, where Windows
+    paths must remain unconverted for the host to interpret them correctly.
+    """
+    # If the command delegates to cmd.exe or powershell.exe, only translate
+    # paths in the portion BEFORE the host command — leave the rest intact.
+    host_cmd = re.match(
+        r'^(.*?\b(?:cmd\.exe|powershell\.exe)\b\s+(?:/[cCkK]\s+)?)(.*)',
+        command,
+        re.DOTALL,
+    )
+    if host_cmd:
+        prefix, host_args = host_cmd.group(1), host_cmd.group(2)
+        # Only translate paths in the prefix (e.g. path to the exe itself)
+        prefix = _translate_paths(prefix)
+        return prefix + host_args
+
+    return _translate_paths(command)
+
+
+def _translate_paths(text: str) -> str:
+    """Replace Windows-style absolute paths with WSL /mnt/ equivalents."""
     # Require backslash OR a single forward slash NOT followed by another slash,
     # so that URL schemes like https:// are not matched as drive paths.
     return re.sub(
         r'[A-Za-z]:[\\\/](?!\/)[^\s\'"]*',
         lambda m: win_to_wsl_path(m.group()),
-        command
+        text
     )
 
 
-def bash_func(command: str) -> str:
+def bash_func(command: str, timeout: int = 60) -> str:
+    """Execute a shell command and return its output.
+
+    Parameters
+    ----------
+    command : str
+        The bash command to execute.
+    timeout : int, optional
+        Maximum execution time in seconds (default 60, max 300).
+    """
     is_safe, remark = validate_command(command)
     if not is_safe:
         return remark
+
+    # Clamp timeout to a safe range
+    timeout = max(5, min(int(timeout), 300))
 
     # Use sandbox if enabled and available
     sandbox_enabled = is_sandbox_enabled()
@@ -81,15 +115,24 @@ def bash_func(command: str) -> str:
     else:
         shell_cmd = ['bash', '-c', command]
 
-    result = subprocess.run(
-        shell_cmd,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        encoding='utf-8',
-        errors='replace'  # replace undecodable chars instead of crashing
-    )
+    try:
+        result = subprocess.run(
+            shell_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+            errors='replace'  # replace undecodable chars instead of crashing
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: Command timed out after {timeout} seconds."
 
     stdout = result.stdout or ''
     stderr = result.stderr or ''
-    return stdout + stderr
+    output = stdout + stderr
+
+    # Append exit code when the command fails so the agent knows
+    if result.returncode != 0:
+        output += f"\n[exit code: {result.returncode}]"
+
+    return output

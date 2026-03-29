@@ -38,21 +38,32 @@ class ClothoWebSocketClient:
             self._disconnecting = True
             await self.ws.close()
 
-    async def send_message(self, text: str, stream: bool = True):
+    async def send_message(
+        self,
+        text: str,
+        stream: bool = True,
+        content_blocks: list[dict] | None = None,
+    ):
         """Send user message to agent.
 
         Args:
-            text: User message text
+            text: User message text (used alone for plain text messages)
             stream: Whether to request streaming responses
+            content_blocks: Optional list of serialized ContentBlock dicts.
+                When provided, sent as structured multi-modal content instead
+                of a plain text string.
 
         Raises:
             RuntimeError: If not connected
         """
         if not self.ws:
             raise RuntimeError("Not connected")
+        data: dict = {"message": text, "stream": stream}
+        if content_blocks:
+            data["content"] = content_blocks
         await self.ws.send(json.dumps({
             "type": "run",
-            "data": {"message": text, "stream": stream}
+            "data": data,
         }))
 
     async def approve_tools(self):

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Callable, Awaitable
 
 from agent.models.tool import Tool
-from agent.models.content_block import TextContent, ToolUseContent, ToolResultContent
+from agent.models.content_block import ContentBlock, ImageContent, TextContent, ToolUseContent, ToolResultContent
 from agent.models.stream_delta import StreamDelta
 from agent.models.turn import AssistantTurn, CompactionTurn, SystemTurn, UserTurn, ToolTurn
 from agent.providers.anthropic import AnthropicModel
@@ -51,6 +51,7 @@ class ClothoController():
         request_approval: Callable[[list[dict]], Awaitable[dict[str, str]]],
         stream: bool = False,
         cancel_event: asyncio.Event | None = None,
+        content: list[dict] | None = None,
     ):
         def _check_cancelled():
             if cancel_event and cancel_event.is_set():
@@ -61,7 +62,15 @@ class ClothoController():
         # Pre-invoke compaction check (before the new user turn is added)
         await self._check_and_compact(emit, cancel_event)
 
-        turn = UserTurn(content=user_input)
+        # Build user turn: use structured content blocks if provided,
+        # otherwise fall back to plain text string.
+        if content:
+            from pydantic import TypeAdapter
+            block_adapter = TypeAdapter(ContentBlock)
+            blocks = [block_adapter.validate_python(b) for b in content]
+            turn = UserTurn(content=blocks)
+        else:
+            turn = UserTurn(content=user_input)
         _check_cancelled()
         if stream:
             response = await self._stream_and_emit(turn, emit, cancel_event)
@@ -241,6 +250,19 @@ class ClothoController():
             _COMPACTION_PRESERVE_N,
             max_summary_tokens,
         )
+
+        # Strip image blocks from preserved turns — images are ephemeral and
+        # their semantic content is captured in the compaction summary. Keeping
+        # raw image data causes errors when providers try to re-process stale
+        # image references in the restructured context.
+        for turn in new_context:
+            if isinstance(turn.content, list):
+                stripped = [b for b in turn.content if not isinstance(b, ImageContent)]
+                if len(stripped) != len(turn.content):
+                    if stripped:
+                        turn.content = stripped
+                    else:
+                        turn.content = "(image previously shared)"
 
         turns_removed = len(self.context) - len(new_context)
 
