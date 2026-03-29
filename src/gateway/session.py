@@ -29,6 +29,15 @@ class SessionState:
     def __init__(self, controller: ClothoController, current_profile_name: str | None = None):
         self.controller = controller
         self.dispatcher = EventDispatcher()
+        # Start the consumer if there's a running event loop (async context).
+        # Sync callers (e.g. REST POST /api/chats) don't have one — the
+        # dispatcher is started lazily when the first WebSocket connects or
+        # the scheduler submits an event.
+        try:
+            asyncio.get_running_loop()
+            self.dispatcher.start()
+        except RuntimeError:
+            pass
         self.cancel_event = asyncio.Event()
         self.pending_approval: asyncio.Future | None = None
         self.current_profile_name = current_profile_name
