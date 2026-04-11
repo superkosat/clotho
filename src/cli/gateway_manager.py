@@ -3,8 +3,11 @@
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import requests
+
+LOG_FILE = Path.home() / ".clotho" / "gateway.log"
 
 
 class GatewayManager:
@@ -20,6 +23,7 @@ class GatewayManager:
         self.host = host
         self.port = port
         self.process: subprocess.Popen | None = None
+        self._log_fh = None
 
     def start(self):
         """Start gateway subprocess.
@@ -27,6 +31,9 @@ class GatewayManager:
         Raises:
             RuntimeError: If gateway fails to start within timeout
         """
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self._log_fh = LOG_FILE.open("a", encoding="utf-8")
+
         # Run uvicorn via Python module to avoid shell issues
         cmd = [
             sys.executable, "-m", "uvicorn",
@@ -34,13 +41,13 @@ class GatewayManager:
             "--factory",
             "--host", self.host,
             "--port", str(self.port),
-            "--log-level", "warning",
+            "--log-level", "info",
         ]
 
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self._log_fh,
+            stderr=self._log_fh,
         )
 
         # Wait for server to be ready (max 10s)
@@ -68,6 +75,9 @@ class GatewayManager:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
+        if self._log_fh:
+            self._log_fh.close()
+            self._log_fh = None
 
     def __enter__(self):
         """Context manager entry."""

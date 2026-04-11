@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 import setproctitle
@@ -11,6 +12,7 @@ from gateway.auth.dependencies import require_token
 from gateway.config import settings
 from gateway.session import SessionManager
 from gateway.routes import health, chats, config, agent, permissions, profiles, sandbox
+from mcp_client import MCPManager
 
 
 async def clotho_exception_handler(_request: Request, exc: ClothoException) -> JSONResponse:
@@ -51,9 +53,13 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logging.getLogger("mcp_client").setLevel(logging.INFO)
     setproctitle.setproctitle("clotho-gateway")
-    app.state.session_manager = SessionManager()
+    mcp_manager = MCPManager()
+    await mcp_manager.start()
+    app.state.session_manager = SessionManager(mcp_manager=mcp_manager)
     yield
+    await mcp_manager.stop()
 
 
 def create_app() -> FastAPI:

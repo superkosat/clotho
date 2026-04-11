@@ -304,7 +304,13 @@ class ClothoController():
             )
 
         valid_params = inspect.signature(tool.func).parameters
-        filtered_args = {k: v for k, v in call.arguments.items() if k in valid_params}
+        has_var_keyword = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in valid_params.values()
+        )
+        if has_var_keyword:
+            filtered_args = call.arguments
+        else:
+            filtered_args = {k: v for k, v in call.arguments.items() if k in valid_params}
 
         try:
             result = tool.func(**filtered_args)
@@ -359,7 +365,19 @@ class ClothoController():
         env_info = build_environment_info(working_directory=os.getcwd())
         skills = load_skills()
         skills_section = build_skills_prompt_section(skills) if skills else None
-        prompt = build_system_prompt(environment_info=env_info, skills_section=skills_section)
+
+        _builtin = {"bash", "read", "write", "edit"}
+        extra_tools = [t for t in (self.tools or []) if t.name not in _builtin]
+        extra_tools_section = (
+            "\n".join(f"- {t.name}: {t.description}" for t in extra_tools)
+            if extra_tools else None
+        )
+
+        prompt = build_system_prompt(
+            environment_info=env_info,
+            skills_section=skills_section,
+            tools_section=extra_tools_section,
+        )
         system_turn = SystemTurn(content=prompt)
 
         if (create_project_file(self.current_project_id, system_turn=system_turn)):

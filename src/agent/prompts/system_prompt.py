@@ -144,7 +144,12 @@ def build_system_prompt(
         sections.append(f"# Environment\n{environment_info}")
 
     if tools_section:
-        sections.append(f"# Tools\n{tools_section}")
+        sections.append(
+            f"# Additional Tools\n"
+            f"The following tools are available in addition to bash, read, write, and edit. "
+            f"Use them when they are the best fit for the task.\n\n"
+            f"{tools_section}"
+        )
 
     if project_context:
         sections.append(f"# Project\n{project_context}")

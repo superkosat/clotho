@@ -14,6 +14,7 @@ from agent.tools.schemas.write import write_tool
 from agent.tools.schemas.edit import edit_tool
 from gateway.dispatcher import EventDispatcher
 from gateway.services.profile_service import ProfileService
+from mcp_client import MCPManager
 
 DEFAULT_TOOLS = [
     bash_tool,
@@ -46,13 +47,20 @@ class SessionState:
 class SessionManager:
     """Maps chat IDs to in-memory SessionState instances."""
 
-    def __init__(self):
+    def __init__(self, mcp_manager: MCPManager | None = None):
         self._sessions: dict[UUID, SessionState] = {}
         self._lock = threading.Lock()
+        self._mcp_manager = mcp_manager
+
+    def _all_tools(self) -> list:
+        tools = list(DEFAULT_TOOLS)
+        if self._mcp_manager:
+            tools.extend(self._mcp_manager.get_tools())
+        return tools
 
     def create_session(self) -> tuple[UUID, SessionState]:
         controller = ClothoController()
-        controller.register_tools(DEFAULT_TOOLS)
+        controller.register_tools(self._all_tools())
         profile_name = self._set_default_model(controller)
         controller.new_chat()
         chat_id = controller.current_project_id
@@ -70,7 +78,7 @@ class SessionManager:
                 return self._sessions[chat_id]
 
         controller = ClothoController()
-        controller.register_tools(DEFAULT_TOOLS)
+        controller.register_tools(self._all_tools())
         profile_name = self._set_default_model(controller)
         if not controller.load_chat(chat_id):
             raise ValueError(f"Chat {chat_id} not found")
