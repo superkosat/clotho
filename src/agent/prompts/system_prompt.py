@@ -147,7 +147,8 @@ def build_system_prompt(
         sections.append(
             f"# Additional Tools\n"
             f"The following tools are available in addition to bash, read, write, and edit. "
-            f"Use them when they are the best fit for the task.\n\n"
+            f"You MUST use the exact tool name shown (copy it character-for-character, "
+            f"including underscores). Do not guess or invent tool names.\n\n"
             f"{tools_section}"
         )
 

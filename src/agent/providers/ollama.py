@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Iterator
 
 from agent.LLM import LLM, _split_at_nth_user_turn, _format_context_for_summary
@@ -7,6 +8,8 @@ from agent.models.stream_delta import StreamDelta
 from agent.models.content_block import TextContent, ImageContent, ToolUseContent, ToolResultContent
 from agent.models.usage import Usage
 import ollama
+
+logger = logging.getLogger(__name__)
 
 _COMPACTION_SYSTEM = (
     "You are a conversation summarizer. Produce a dense, factual summary of the "
@@ -51,38 +54,47 @@ class OllamaModel(LLM):
         stop_reason = "end_turn"
         tool_use_blocks = []
 
-        for chunk in stream:
-            model_name = chunk.model or model_name
+        try:
+            for chunk in stream:
+                model_name = chunk.model or model_name
 
-            if chunk.message.content:
-                collected_text += chunk.message.content
-                yield StreamDelta(type="text_delta", text=chunk.message.content)
+                if chunk.message.content:
+                    collected_text += chunk.message.content
+                    yield StreamDelta(type="text_delta", text=chunk.message.content)
 
-            if chunk.message.tool_calls:
-                stop_reason = "tool_use"
-                for tc in chunk.message.tool_calls:
-                    tool_id = tc.function.name
-                    tool_use_blocks.append(ToolUseContent(
-                        id=tool_id,
-                        name=tc.function.name,
-                        arguments=tc.function.arguments,
-                    ))
-                    yield StreamDelta(
-                        type="tool_use_start",
-                        tool_call_id=tool_id,
-                        tool_call_name=tc.function.name,
-                    )
+                if chunk.message.tool_calls:
+                    stop_reason = "tool_use"
+                    for tc in chunk.message.tool_calls:
+                        tool_id = tc.function.name
+                        tool_use_blocks.append(ToolUseContent(
+                            id=tool_id,
+                            name=tc.function.name,
+                            arguments=tc.function.arguments,
+                        ))
+                        yield StreamDelta(
+                            type="tool_use_start",
+                            tool_call_id=tool_id,
+                            tool_call_name=tc.function.name,
+                        )
 
-            if hasattr(chunk, 'prompt_eval_count') and chunk.prompt_eval_count:
-                input_tokens = chunk.prompt_eval_count
-            if hasattr(chunk, 'eval_count') and chunk.eval_count:
-                output_tokens = chunk.eval_count
+                if hasattr(chunk, 'prompt_eval_count') and chunk.prompt_eval_count:
+                    input_tokens = chunk.prompt_eval_count
+                if hasattr(chunk, 'eval_count') and chunk.eval_count:
+                    output_tokens = chunk.eval_count
 
-            if hasattr(chunk, 'done_reason') and chunk.done_reason:
-                if chunk.done_reason == "stop":
-                    stop_reason = stop_reason if stop_reason == "tool_use" else "end_turn"
-                else:
-                    stop_reason = "max_tokens"
+                if hasattr(chunk, 'done_reason') and chunk.done_reason:
+                    if chunk.done_reason == "stop":
+                        stop_reason = stop_reason if stop_reason == "tool_use" else "end_turn"
+                    else:
+                        stop_reason = "max_tokens"
+        except ollama.ResponseError as exc:
+            logger.warning("Ollama stream error (likely malformed tool call JSON): %s", exc)
+            # Surface the error as readable text so the turn completes rather than crashes
+            error_text = f"[Model output error: {exc}. Try rephrasing, or switch to a model with stronger tool-use support.]"
+            collected_text += error_text
+            yield StreamDelta(type="text_delta", text=error_text)
+            stop_reason = "end_turn"
+            tool_use_blocks.clear()
 
         content_blocks = []
         if collected_text:
@@ -112,12 +124,21 @@ class OllamaModel(LLM):
         if max_tokens is not None:
             options['num_predict'] = max_tokens
 
-        response = self.client.chat(
-            model=self.model,
-            messages=ollama_messages,
-            tools=tools,
-            options=options,
-        )
+        try:
+            response = self.client.chat(
+                model=self.model,
+                messages=ollama_messages,
+                tools=tools,
+                options=options,
+            )
+        except ollama.ResponseError as exc:
+            logger.warning("Ollama invoke error (likely malformed tool call JSON): %s", exc)
+            return AssistantTurn(
+                content=f"[Model output error: {exc}. Try rephrasing, or switch to a model with stronger tool-use support.]",
+                model=self.model,
+                stop_reason="end_turn",
+                usage=Usage(input_tokens=0, output_tokens=0),
+            )
 
         return self._to_assistant_turn(response)
 

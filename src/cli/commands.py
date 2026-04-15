@@ -399,3 +399,63 @@ class CommandHandler:
         """Launch the interactive channel setup wizard."""
         from cli.setup import run_channel_setup
         await run_channel_setup(self.console)
+
+    async def handle_mcp(self, args: list[str]) -> None:
+        """Handle /mcp subcommands."""
+        from mcp_client.config import load_mcp_servers
+
+        if not args or args[0] == "list":
+            configs = load_mcp_servers()
+            if not configs:
+                print_warning(self.console, "No MCP servers configured")
+                return
+            table = Table(title="MCP Servers", border_style=PURPLE)
+            table.add_column("Name", style=GREEN)
+            table.add_column("Transport")
+            table.add_column("Auth")
+            table.add_column("Enabled", style=GREEN)
+            for cfg in configs:
+                auth_type = (cfg.auth or {}).get("type", "none")
+                table.add_row(
+                    cfg.name,
+                    cfg.transport,
+                    auth_type,
+                    "✓" if cfg.enabled else "",
+                )
+            self.console.print(table)
+            return
+
+        if args[0] == "auth":
+            if len(args) < 2:
+                print_error(self.console, "Usage: /mcp auth <server>")
+                return
+            await self._mcp_auth(args[1])
+            return
+
+        print_error(self.console, "Unknown mcp subcommand")
+        self.console.print("Usage: /mcp [list|auth <server>]")
+
+    async def _mcp_auth(self, server_name: str) -> None:
+        from mcp_client.config import load_mcp_servers
+        from mcp_client.client import MCPClient
+
+        configs = {c.name: c for c in load_mcp_servers()}
+        if server_name not in configs:
+            print_error(self.console, f"Unknown MCP server: {server_name}")
+            return
+
+        cfg = configs[server_name]
+        if cfg.transport != "streamable_http" or (cfg.auth or {}).get("type") != "oauth":
+            print_error(self.console, f"Server '{server_name}' does not use OAuth auth")
+            return
+
+        self.console.print(f"Starting OAuth flow for [bold]{server_name}[/bold]...")
+        self.console.print("Your browser will open — complete authorization then return here.")
+
+        client = MCPClient(cfg)
+        try:
+            await client.authorize()
+            print_success(self.console, f"Authorization complete for '{server_name}'")
+            print_muted(self.console, "Restart the gateway to connect with the new credentials.")
+        except Exception as e:
+            print_error(self.console, f"Authorization failed: {e}")

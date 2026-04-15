@@ -4,7 +4,7 @@
   <img src="docs/clotho.png" alt="Clotho" width="100%">
 </p>
 
-A local AI assistant with a gateway architecture. Clotho runs a local server that manages agent sessions, tool execution, and model routing. Interact with it through the terminal REPL, Discord, scheduled jobs, or build your own client against the REST/WebSocket API.
+A an agentic harness with a central gateway architecture. Clotho runs a local server that manages agent sessions, tool execution, and model routing. Interact with it through the terminal REPL, Discord, scheduled jobs, or build your own client against the REST/WebSocket API.
 
 ## Installation
 
@@ -145,6 +145,107 @@ description: Stage and commit changes with a conventional commit message.
 
 Only the frontmatter metadata is injected into the system prompt. The full instructions stay on disk and are loaded by the agent when a skill matches the user's request.
 
+## MCP Servers
+
+Clotho can connect to external MCP (Model Context Protocol) servers at startup, adding their tools to every agent session. Tools from MCP servers are available alongside the built-in `bash`, `read`, `write`, and `edit` tools — the model sees them all the same way.
+
+### Configuration
+
+Add servers under `"mcp"` in `~/.clotho/config.json`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "filesystem": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+      },
+      "github": {
+        "transport": "streamable_http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "auth": {
+          "type": "token",
+          "token_env": "GITHUB_TOKEN"
+        }
+      }
+    }
+  }
+}
+```
+
+Each server has a **key** (e.g. `"filesystem"`) that becomes the tool name prefix. A tool named `list_directory` on the `filesystem` server becomes `filesystem__list_directory` in Clotho. Set `"tool_prefix": ""` to disable prefixing, or `"tool_prefix": "fs"` for a custom prefix.
+
+### Transports
+
+**stdio** — spawns a local subprocess:
+
+| Field | Required | Description |
+|---|---|---|
+| `transport` | yes | `"stdio"` |
+| `command` | yes | Executable to run (e.g. `npx`, `python`) |
+| `args` | no | Arguments passed to the process |
+| `env` | no | Extra environment variables for the subprocess |
+
+**streamable_http** — connects to a remote server:
+
+| Field | Required | Description |
+|---|---|---|
+| `transport` | yes | `"streamable_http"` |
+| `url` | yes | Server endpoint URL |
+| `auth` | no | Authentication config (see below) |
+
+### Authentication
+
+**No auth** — omit `auth` entirely. Suitable for local stdio servers.
+
+**Static token** — reads a bearer token from an environment variable:
+
+```json
+"auth": {
+  "type": "token",
+  "token_env": "GITHUB_TOKEN"
+}
+```
+
+**OAuth** — full Authorization Code flow with PKCE. Requires interactive authorization before first use (see below):
+
+```json
+"auth": {
+  "type": "oauth",
+  "scopes": ["tools:read", "tools:execute"]
+}
+```
+
+> **Note:** The gateway is headless — it cannot run an OAuth browser flow at startup. OAuth servers require stored credentials from a prior `/mcp auth` session. Servers whose tokens are missing or expired are skipped gracefully at startup.
+
+### OAuth Authorization
+
+For OAuth servers, authorize once from the REPL before starting the gateway:
+
+```
+/mcp auth <server>
+```
+
+This opens the browser, completes the OAuth flow, and stores tokens in `~/.clotho/mcp/tokens/<server>.json`. The gateway reads these tokens on subsequent starts — no browser interaction needed after the first time. Tokens are refreshed automatically; re-run `/mcp auth` if a server becomes unauthorized.
+
+### REPL Commands
+
+| Command | Description |
+|---|---|
+| `/mcp` | List configured MCP servers |
+| `/mcp auth <server>` | Authorize an OAuth server interactively |
+
+### Server Options
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Set to `false` to skip without removing the entry |
+| `tool_prefix` | server key | Prefix for tool names (`""` to disable) |
+
+If a server fails to connect at startup, Clotho logs the error and continues — the remaining servers and built-in tools are unaffected.
+
 ## Discord Bridge
 
 Clotho can connect to Discord as a bot, letting you interact with the agent through DMs or server channels. The bridge is a standalone process that connects to a running gateway.
@@ -260,3 +361,4 @@ All config and persisted data lives in `~/.clotho/`:
 | `discord/sessions.json` | Discord user/channel → chat ID mapping |
 | `jobs/*.yaml` | Scheduled job definitions |
 | `scheduler/jobs.sqlite` | APScheduler job state |
+| `mcp/tokens/*.json` | OAuth tokens for MCP servers (one file per server) |

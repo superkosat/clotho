@@ -189,6 +189,9 @@ class ClothoController():
         if current_tokens / self.context_window < _COMPACTION_THRESHOLD:
             return
 
+        if cancel_event and cancel_event.is_set():
+            return
+
         if emit:
             await emit("agent.compaction_started", {
                 "tokens_before": current_tokens,
@@ -369,7 +372,7 @@ class ClothoController():
         _builtin = {"bash", "read", "write", "edit"}
         extra_tools = [t for t in (self.tools or []) if t.name not in _builtin]
         extra_tools_section = (
-            "\n".join(f"- {t.name}: {t.description}" for t in extra_tools)
+            "\n".join(f"- `{t.name}`: {t.description}" for t in extra_tools)
             if extra_tools else None
         )
 

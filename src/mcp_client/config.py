@@ -15,7 +15,7 @@ class MCPServerConfig:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None              # http: endpoint URL
-    auth: dict | None = None            # auth config (phase 3)
+    auth: dict | None = None            # auth config: {"type": "token", "token_env": "VAR"} | oauth (phase 3)
     enabled: bool = True
     tool_prefix: str | None = None      # None = use server name; "" = no prefix
     # Stubbed — accepted in config, not yet implemented:

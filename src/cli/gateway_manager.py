@@ -47,7 +47,7 @@ class GatewayManager:
         self.process = subprocess.Popen(
             cmd,
             stdout=self._log_fh,
-            stderr=self._log_fh,
+            stderr=subprocess.STDOUT,  # merge stderr into stdout's handle, not a duplicate fd
         )
 
         # Wait for server to be ready (max 10s)

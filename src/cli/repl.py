@@ -441,6 +441,8 @@ class ClothoREPL:
             self.command_handler.handle_context(self.chat_id)
         elif cmd == "setup":
             await self.command_handler.handle_setup()
+        elif cmd == "mcp":
+            await self.command_handler.handle_mcp(args)
         else:
             print_error(self.console, f"Unknown command: /{cmd}")
             self.console.print(f"Type [{GREEN}]/help[/{GREEN}] for available commands")
@@ -488,6 +490,8 @@ class ClothoREPL:
             ("/compact", "Summarize old conversation turns to free context space"),
             ("/context", "Show context window usage"),
             ("/setup", "Configure a messaging channel (Discord, ...)"),
+            ("/mcp", "List configured MCP servers"),
+            ("/mcp auth <server>", "Authorize an OAuth MCP server"),
         ]
 
         max_cmd_len = max(len(cmd) for cmd, _ in commands)
