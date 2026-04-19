@@ -52,3 +52,7 @@ Permissions are stored in `~/.clotho/config.json`:
   }
 }
 ```
+
+## Important Note
+
+Since Clotho relies heavily on filesystem read access to understand its environment, and read critical files in `~/.clotho/workspace`, it is recommended to set a tool override for `"read": "allow"` if using interactive mode or readonly permissions mode. This allows for a more seamless user experience, without approval fatigue.

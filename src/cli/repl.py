@@ -294,7 +294,7 @@ class ClothoREPL:
                 text.append(ch, style=f"bold #{r:02x}{g:02x}{b:02x}")
             self.console.print(text, justify="center")
         self.console.print()
-        tagline = Text("AI Coding Agent", style=f"italic {DIM}")
+        tagline = Text("Spindle and Thread", style=f"italic {DIM}")
         self.console.print(tagline, justify="center")
         self.console.print()
         hints = Text()

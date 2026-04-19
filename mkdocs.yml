@@ -64,6 +64,7 @@ nav:
     - Discord: channels/discord.md
   - Features:
     - Skills: features/skills.md
+    - Workspace & Identity: features/workspace.md
     - Scheduled Jobs: features/scheduled-jobs.md
     - Context Compaction: features/compaction.md
   - Reference:
