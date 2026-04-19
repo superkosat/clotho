@@ -30,6 +30,7 @@ class ClothoWebSocketClient:
             self.url,
             ping_interval=30,
             ping_timeout=120,
+            max_size=None,
         )
 
     async def disconnect(self):
