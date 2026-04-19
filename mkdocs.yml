@@ -1,0 +1,73 @@
+site_name: Clotho
+site_description: An agentic harness with a central gateway architecture
+site_url: https://superkosat.github.io/clotho
+repo_url: https://github.com/superkosat/clotho
+repo_name: superkosat/clotho
+edit_uri: edit/master/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - https://unpkg.com/mermaid@11/dist/mermaid.min.js
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - First Run: getting-started/first-run.md
+  - Configuration:
+    - Providers & Profiles: configuration/profiles.md
+    - Permissions: configuration/permissions.md
+    - Sandbox: configuration/sandbox.md
+    - MCP Servers: configuration/mcp.md
+  - Channels:
+    - Discord: channels/discord.md
+  - Features:
+    - Skills: features/skills.md
+    - Scheduled Jobs: features/scheduled-jobs.md
+    - Context Compaction: features/compaction.md
+  - Reference:
+    - REPL Commands: reference/repl-commands.md
+    - CLI Reference: reference/cli.md
+    - Config Files: reference/config-files.md
+    - REST API: reference/api.md
