@@ -4,7 +4,9 @@
   <img src="docs/clotho.png" alt="Clotho" width="100%">
 </p>
 
-A an agentic harness with a central gateway architecture. Clotho runs a local server that manages agent sessions, tool execution, and model routing. Interact with it through the terminal REPL, Discord, scheduled jobs, or build your own client against the REST/WebSocket API.
+A an agent framework with a central gateway architecture. Clotho runs a local server that manages agent sessions, tool execution, and model routing. Interact with it through the terminal REPL, Discord, scheduled jobs, or build your own client against the REST/WebSocket API.
+
+[Documentation](https://superkosat.github.io/clotho)
 
 ## Installation
 

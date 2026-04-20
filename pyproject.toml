@@ -8,7 +8,7 @@ packages = ["src/agent", "src/gateway", "src/security", "src/sandbox", "src/cli"
 [project]
 name = "clotho"
 version = "0.1.0"
-description = "A CLI-based coding agent"
+description = "A general-purpose agentic harness with a central gateway architecture"
 license = {text = "MIT"}
 authors = [{name = "Alec Sirkin"}]
 readme = "README.md"
